@@ -1,0 +1,52 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="home-shell">
+    <h1 class="game-title">SHMAMALE</h1>
+
+    <section class="menu-grid">
+        <div class="menu-card menu-card-purple">
+            <h2>MULTIPLAYER</h2>
+            <a href="/create-room" class="btn btn-purple full">CREATE ROOM</a>
+            <form action="/join-room" method="POST" class="join-form">
+                <input type="text" name="room_id" maxlength="8" placeholder="ROOM CODE" autocomplete="off">
+                <button type="submit" class="btn btn-green full">JOIN ROOM</button>
+            </form>
+        </div>
+
+        <div class="menu-card menu-card-green">
+            <h2>VS BOTS</h2>
+            <form action="/botgamescreen" method="POST" class="join-form">
+                <label class="menu-label">
+                    Bots
+                    <select name="bot_count">
+                        <option value="1">1 bot</option>
+                        <option value="2" selected>2 bots</option>
+                        <option value="3">3 bots</option>
+                        <option value="4">4 bots</option>
+                        <option value="5">5 bots</option>
+                    </select>
+                </label>
+                <label class="menu-label">
+                    Difficulty
+                    <select name="difficulty">
+                        <option value="easy">Easy</option>
+                        <option value="medium" selected>Medium</option>
+                        <option value="hard">Hard</option>
+                    </select>
+                </label>
+                <button type="submit" class="btn btn-green full">PLAY BOTS</button>
+            </form>
+        </div>
+
+        <div class="menu-card menu-card-blue">
+            <h2>HOUSE RULES</h2>
+            <div class="rule-list">
+                <span>First to 50 loses</span>
+                <span>2x2 hidden board</span>
+                <span>Specials on 7-K</span>
+                <span>Burn matching discards</span>
+            </div>
+        </div>
+    </section>
+</main>
+{% endblock %}
