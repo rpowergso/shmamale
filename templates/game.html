@@ -1,0 +1,127 @@
+{% extends "layout.html" %}
+{% block content %}
+<script>
+    const ROOM_ID = "{{ room_id }}";
+</script>
+
+<div id="toast" class="toast"></div>
+<div id="conn-banner" class="conn-banner hidden"></div>
+
+<section id="lobby" class="lobby-card">
+    <h1>WAITING ROOM</h1>
+    <div class="room-code">CODE <strong>{{ room_id }}</strong></div>
+
+    <div id="host-controls" class="host-controls hidden">
+        <h3>HOST SETTINGS</h3>
+        <label>
+            Losing score
+            <input id="setting-target" type="number" min="10" max="500" value="50">
+        </label>
+        <label>
+            Decks
+            <input id="setting-decks" type="number" min="1" max="4" value="1">
+        </label>
+        <label>
+            Jokers per deck
+            <input id="setting-jokers" type="number" min="0" max="8" value="2">
+        </label>
+    </div>
+
+    <div class="lobby-list">
+        <h3>PLAYERS</h3>
+        <div id="player-list"></div>
+    </div>
+
+    <div class="lobby-actions">
+        <a href="/homepage" class="btn btn-red">LEAVE</a>
+        <button id="ready-btn" class="btn btn-blue">READY UP</button>
+        <button id="start-btn" class="btn btn-green hidden">START GAME</button>
+    </div>
+</section>
+
+<main id="game" class="game-shell hidden">
+    <header class="topbar">
+        <a href="/homepage" class="btn btn-red small-btn">LEAVE</a>
+        <div class="topbar-center">
+            <div class="turn-box">
+                <strong id="turn-text">WAITING</strong>
+                <span id="phase-text"></span>
+            </div>
+            <div id="action-hint" class="action-hint"></div>
+        </div>
+        <div class="room-pill">ROOM {{ room_id }}</div>
+    </header>
+
+    <div class="play-area">
+        <div class="table-3d">
+            <div class="table-stage">
+                <!-- Front legs only — exponential outward flare, no feet -->
+                <div class="table-legs" aria-hidden="true">
+                    <span class="table-leg fl">
+                        <svg viewBox="0 0 70 170" preserveAspectRatio="none">
+                            <defs>
+                                <linearGradient id="leg-wood-fl" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stop-color="#8a5a32"/>
+                                    <stop offset="28%" stop-color="#5c3a22"/>
+                                    <stop offset="68%" stop-color="#3d2614"/>
+                                    <stop offset="100%" stop-color="#1a0e08"/>
+                                </linearGradient>
+                            </defs>
+                            <!-- Outer left edge flares out exponentially -->
+                            <path fill="url(#leg-wood-fl)" d="M48,0 L26,0 C22,12 12,55 2,170 L36,170 C38,110 44,42 48,0 Z"/>
+                        </svg>
+                    </span>
+                    <span class="table-leg fr">
+                        <svg viewBox="0 0 70 170" preserveAspectRatio="none">
+                            <defs>
+                                <linearGradient id="leg-wood-fr" x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stop-color="#8a5a32"/>
+                                    <stop offset="28%" stop-color="#5c3a22"/>
+                                    <stop offset="68%" stop-color="#3d2614"/>
+                                    <stop offset="100%" stop-color="#1a0e08"/>
+                                </linearGradient>
+                            </defs>
+                            <!-- Outer right edge flares out exponentially -->
+                            <path fill="url(#leg-wood-fr)" d="M22,0 L44,0 C48,12 58,55 68,170 L34,170 C32,110 26,42 22,0 Z"/>
+                        </svg>
+                    </span>
+                </div>
+                <div class="table-surface">
+                    <div class="felt"></div>
+                    <div class="table-center-piles">
+                        <div class="pile draw-pile" id="draw-pile">
+                            <button id="draw-btn" type="button" class="card-back pile-card" aria-label="Draw pile"></button>
+                            <div id="draw-count" class="pile-count">0</div>
+                        </div>
+                        <div class="pile discard-pile" id="discard-pile">
+                            <button id="discard-btn" type="button" class="playing-card pile-card empty-card" aria-label="Discard pile">EMPTY</button>
+                            <div id="discard-count" class="pile-count">0</div>
+                        </div>
+                    </div>
+                    <section id="seats" class="seats"></section>
+                </div>
+                <!-- Screen-flat AR overlays (outside the tilted table plane) -->
+                <div id="ar-labels" class="ar-labels">
+                    <button type="button" class="prompt-label" id="draw-prompt">draw</button>
+                    <button type="button" class="prompt-label" id="take-prompt">take</button>
+                    <button type="button" class="prompt-label play-prompt hidden" id="play-prompt">play</button>
+                </div>
+                <section id="nameplates" class="nameplates"></section>
+            </div>
+        </div>
+
+        <aside class="side-panel" aria-label="Scores and call">
+            <div class="side-panel-title">Points</div>
+            <div id="score-chips" class="score-chips"></div>
+            <button id="call-btn" class="btn btn-yellow call-btn">CALL</button>
+        </aside>
+
+        <div id="fly-layer" class="fly-layer" aria-hidden="true"></div>
+        <div id="ability-overlay" class="ability-overlay hidden"></div>
+    </div>
+</main>
+
+<script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
+<script src="{{ url_for('static', filename='js/shmamale.js') }}"></script>
+<script src="{{ url_for('static', filename='js/multiplayer.js') }}"></script>
+{% endblock %}
