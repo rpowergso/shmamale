@@ -23,37 +23,22 @@
     </header>
 
     <div class="play-area">
-        <div class="table-3d">
-            <div class="table-stage">
-                <!-- Front legs only — exponential outward flare, no feet -->
-                <div class="table-legs" aria-hidden="true">
+        <div class="table-legs" aria-hidden="true">
                     <span class="table-leg fl">
-                        <svg viewBox="0 0 70 170" preserveAspectRatio="none">
-                            <defs>
-                                <linearGradient id="leg-wood-bot-fl" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stop-color="#8a5a32"/>
-                                    <stop offset="28%" stop-color="#5c3a22"/>
-                                    <stop offset="68%" stop-color="#3d2614"/>
-                                    <stop offset="100%" stop-color="#1a0e08"/>
-                                </linearGradient>
-                            </defs>
-                            <path fill="url(#leg-wood-bot-fl)" d="M48,0 L26,0 C22,12 12,55 2,170 L36,170 C38,110 44,42 48,0 Z"/>
+                        <svg viewBox="0 0 100 170" preserveAspectRatio="none">
+                            <path class="leg-core" d="M50 0C50 59 42 120 10 157"/>
+                            <path class="leg-highlight" d="M46 4C46 60 38 114 14 149"/>
                         </svg>
                     </span>
                     <span class="table-leg fr">
-                        <svg viewBox="0 0 70 170" preserveAspectRatio="none">
-                            <defs>
-                                <linearGradient id="leg-wood-bot-fr" x1="0" y1="0" x2="0" y2="1">
-                                    <stop offset="0%" stop-color="#8a5a32"/>
-                                    <stop offset="28%" stop-color="#5c3a22"/>
-                                    <stop offset="68%" stop-color="#3d2614"/>
-                                    <stop offset="100%" stop-color="#1a0e08"/>
-                                </linearGradient>
-                            </defs>
-                            <path fill="url(#leg-wood-bot-fr)" d="M22,0 L44,0 C48,12 58,55 68,170 L34,170 C32,110 26,42 22,0 Z"/>
+                        <svg viewBox="0 0 100 170" preserveAspectRatio="none">
+                            <path class="leg-core" d="M50 0C50 59 58 120 90 157"/>
+                            <path class="leg-highlight" d="M54 4C54 60 62 114 86 149"/>
                         </svg>
                     </span>
-                </div>
+        </div>
+        <div class="table-3d">
+            <div class="table-stage">
                 <div class="table-surface">
                     <div class="felt"></div>
                     <div class="table-center-piles">
@@ -68,14 +53,15 @@
                     </div>
                     <section id="seats" class="seats"></section>
                 </div>
-                <div id="ar-labels" class="ar-labels">
-                    <button type="button" class="prompt-label" id="draw-prompt">draw</button>
-                    <button type="button" class="prompt-label" id="take-prompt">take</button>
-                    <button type="button" class="prompt-label play-prompt hidden" id="play-prompt">play</button>
-                </div>
-                <section id="nameplates" class="nameplates"></section>
             </div>
         </div>
+        <div id="ar-labels" class="ar-labels">
+            <button type="button" class="prompt-label" id="draw-prompt">draw</button>
+            <button type="button" class="prompt-label" id="take-prompt">take</button>
+            <button type="button" class="prompt-label play-prompt hidden" id="play-prompt">play</button>
+        </div>
+        <section id="hand-overlays" class="hand-overlays"></section>
+        <section id="nameplates" class="nameplates"></section>
 
         <aside class="side-panel" aria-label="Scores and call">
             <div class="side-panel-title">Points</div>

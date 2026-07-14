@@ -1,5 +1,6 @@
 from copy import deepcopy
 import random
+import time
 
 from flask import request
 from flask_socketio import emit, join_room
@@ -20,6 +21,7 @@ from game import (
 
 
 rooms = {}
+FINAL_COUNTDOWN_SECONDS = 3.0
 
 BOT_NAMES = ["Mina", "Jax", "Rin", "Theo", "Zara"]
 BOT_CONFIG = {
@@ -27,24 +29,69 @@ BOT_CONFIG = {
         "reaction": (3.2, 5.2),
         "swap_gain": 6,
         "discard_gain": 5,
+        "take_low_value": 1,
+        "take_low_min_gain": 1,
         "ability_rate": 0.25,
         "call_score": -1,
+        "call_rate": 0.45,
+        "call_card_count": 0,
+        "call_card_score": -1,
+        "final_call_score": -1,
+        "final_call_rate": 0.35,
+        "burn_own_min": 9,
+        "burn_opponent_gain": 99,
+        "peek_burn_rate": 0.25,
+        "random_swap": 0.28,
+        "switch_random_rate": 1.0,
+        "switch_execute_rate": 0.55,
+        "switch_own_min": 99,
+        "switch_target_lowest": 0,
         "mistake": 0.35,
     },
     "medium": {
-        "reaction": (2.4, 4.2),
-        "swap_gain": 3,
-        "discard_gain": 2,
-        "ability_rate": 0.65,
-        "call_score": 1,
-        "mistake": 0.12,
+        "reaction": (1.6, 2.8),
+        "swap_gain": 1,
+        "discard_gain": 1,
+        "take_low_value": 0,
+        "take_low_min_gain": 0,
+        "ability_rate": 0.88,
+        "call_score": 2,
+        "call_rate": 1.0,
+        "call_card_count": 2,
+        "call_card_score": 4,
+        "final_call_score": 7,
+        "final_call_rate": 1.0,
+        "burn_own_min": 3,
+        "burn_opponent_gain": 2,
+        "peek_burn_rate": 0.9,
+        "random_swap": 0.03,
+        "switch_random_rate": 0.0,
+        "switch_execute_rate": 1.0,
+        "switch_own_min": 5,
+        "switch_target_lowest": 0.72,
+        "mistake": 0.05,
     },
     "hard": {
         "reaction": (1.6, 3.0),
         "swap_gain": 1,
         "discard_gain": 1,
+        "take_low_value": 0,
+        "take_low_min_gain": 0,
         "ability_rate": 0.95,
         "call_score": 0,
+        "call_rate": 1.0,
+        "call_card_count": 3,
+        "call_card_score": 3,
+        "final_call_score": 7,
+        "final_call_rate": 1.0,
+        "burn_own_min": 1,
+        "burn_opponent_gain": 0,
+        "peek_burn_rate": 0.98,
+        "random_swap": 0.01,
+        "switch_random_rate": 0.0,
+        "switch_execute_rate": 1.0,
+        "switch_own_min": -2,
+        "switch_target_lowest": 1,
         "mistake": 0.03,
     },
 }
@@ -72,6 +119,8 @@ def new_room(host_sid):
         "held_peek": None,
         "first_caller_sid": None,
         "final_turns_remaining": [],
+        "final_countdown_token": 0,
+        "final_countdown_deadline": None,
         "next_start_sid": None,
         "round_results": None,
         "winner_summary": None,
@@ -82,6 +131,7 @@ def new_room(host_sid):
         "discard_epoch": 0,
         "burnt_slots": [],
         "burn_blockers": [],
+        "action_sequence": 0,
         "last_action": None,
     }
 
@@ -94,7 +144,7 @@ def is_bot_player(player):
     return player.get("is_bot", False)
 
 
-def make_player(username, is_bot=False, difficulty=None):
+def make_player(username, is_bot=False, difficulty=None, bot_policy=None):
     return {
         "username": username,
         "ready": is_bot,
@@ -107,10 +157,57 @@ def make_player(username, is_bot=False, difficulty=None):
         "connected": True,
         "is_bot": is_bot,
         "difficulty": difficulty or "",
+        "bot_policy": bot_policy or {},
     }
 
 
-def configure_bots(game, room, count, difficulty):
+def normalize_bot_policy(raw_policy, difficulty):
+    policy = deepcopy(BOT_CONFIG.get(difficulty, BOT_CONFIG["medium"]))
+    if not isinstance(raw_policy, dict):
+        return policy
+
+    reaction = raw_policy.get("reaction")
+    if isinstance(reaction, (list, tuple)) and len(reaction) == 2:
+        try:
+            low = max(0.3, min(8.0, float(reaction[0])))
+            high = max(low, min(10.0, float(reaction[1])))
+            policy["reaction"] = (low, high)
+        except (TypeError, ValueError):
+            pass
+
+    bounds = {
+        "mistake": (0.0, 0.8),
+        "random_swap": (0.0, 1.0),
+        "swap_gain": (-5.0, 20.0),
+        "discard_gain": (-5.0, 20.0),
+        "take_low_value": (-2.0, 13.0),
+        "take_low_min_gain": (-5.0, 20.0),
+        "ability_rate": (0.0, 1.0),
+        "peek_burn_rate": (0.0, 1.0),
+        "call_score": (-5.0, 30.0),
+        "call_rate": (0.0, 1.0),
+        "call_card_count": (0.0, 12.0),
+        "call_card_score": (-5.0, 30.0),
+        "final_call_score": (-5.0, 30.0),
+        "final_call_rate": (0.0, 1.0),
+        "burn_own_min": (-2.0, 99.0),
+        "burn_opponent_gain": (-5.0, 99.0),
+        "switch_random_rate": (0.0, 1.0),
+        "switch_execute_rate": (0.0, 1.0),
+        "switch_own_min": (-2.0, 99.0),
+        "switch_target_lowest": (0.0, 1.0),
+    }
+    for key, (lower, upper) in bounds.items():
+        if key not in raw_policy:
+            continue
+        try:
+            policy[key] = max(lower, min(upper, float(raw_policy[key])))
+        except (TypeError, ValueError):
+            continue
+    return policy
+
+
+def configure_bots(game, room, count, difficulty, bot_policy=None):
     difficulty = difficulty if difficulty in BOT_CONFIG else "medium"
     try:
         count = max(1, min(5, int(count)))
@@ -128,7 +225,13 @@ def configure_bots(game, room, count, difficulty):
     for number in range(1, count + 1):
         sid = bot_sid(room, number)
         name = f"{BOT_NAMES[(number - 1) % len(BOT_NAMES)]} Bot"
-        game["players"][sid] = make_player(name, is_bot=True, difficulty=difficulty)
+        policy = normalize_bot_policy(bot_policy, difficulty)
+        game["players"][sid] = make_player(
+            name,
+            is_bot=True,
+            difficulty=difficulty,
+            bot_policy=policy,
+        )
         game["player_order"].append(sid)
 
 
@@ -162,7 +265,14 @@ def slot_key(owner_sid, index):
 
 
 def set_last_action(game, action_type, **payload):
-    game["last_action"] = {"type": action_type, "epoch": game.get("discard_epoch", 0), **payload}
+    game["action_sequence"] = game.get("action_sequence", 0) + 1
+    game["last_action"] = {
+        "type": action_type,
+        "id": game["action_sequence"],
+        "epoch": game.get("discard_epoch", 0),
+        **payload,
+    }
+    refresh_final_countdown(game)
 
 
 def clear_last_action(game):
@@ -380,6 +490,11 @@ def player_view(game, viewer_sid):
             "card": public_card(peek["card"]) if peek["sid"] == viewer_sid else None,
         }
 
+    countdown_deadline = game.get("final_countdown_deadline")
+    countdown_ends_at = None
+    if countdown_deadline is not None:
+        countdown_ends_at = int(countdown_deadline * 1000)
+
     return {
         "status": game["status"],
         "settings": game["settings"],
@@ -406,6 +521,7 @@ def player_view(game, viewer_sid):
         "last_action": deepcopy(game.get("last_action")),
         "first_caller_sid": game["first_caller_sid"],
         "final_turns_remaining": list(game["final_turns_remaining"]),
+        "final_countdown_ends_at": countdown_ends_at,
         "round_results": deepcopy(game["round_results"]),
         "winner_summary": deepcopy(game["winner_summary"]),
         "action_log": list(game["action_log"]),
@@ -419,6 +535,57 @@ def emit_state(room):
     for sid in live_human_sids(game):
         socketio.emit("game_state", player_view(game, sid), room=sid)
     maybe_schedule_bot_work(room)
+
+
+def final_countdown_pending(game):
+    return bool(
+        game.get("pending_draw")
+        or game.get("pending_ability")
+        or game.get("pending_burn")
+        or game.get("held_peek")
+    )
+
+
+def pause_final_countdown(game):
+    game["final_countdown_token"] = game.get("final_countdown_token", 0) + 1
+    game["final_countdown_deadline"] = None
+
+
+def refresh_final_countdown(game):
+    if (
+        game.get("status") != "playing"
+        or not game.get("first_caller_sid")
+        or game.get("final_turns_remaining")
+    ):
+        return
+    if final_countdown_pending(game):
+        pause_final_countdown(game)
+        return
+
+    room = game.get("room_id")
+    if not room:
+        return
+    game["phase"] = "final_countdown"
+    game["final_countdown_token"] = game.get("final_countdown_token", 0) + 1
+    token = game["final_countdown_token"]
+    game["final_countdown_deadline"] = time.time() + FINAL_COUNTDOWN_SECONDS
+    socketio.start_background_task(run_final_countdown, room, token)
+
+
+def run_final_countdown(room, token):
+    socketio.sleep(FINAL_COUNTDOWN_SECONDS)
+    game = rooms.get(room)
+    if (
+        not game
+        or game.get("status") != "playing"
+        or game.get("final_countdown_token") != token
+        or game.get("final_turns_remaining")
+        or final_countdown_pending(game)
+    ):
+        return
+    game["final_countdown_deadline"] = None
+    finish_round(game)
+    emit_state(room)
 
 
 def emit_error(message):
@@ -457,6 +624,7 @@ def start_round(game):
     game["held_peek"] = None
     game["first_caller_sid"] = None
     game["final_turns_remaining"] = []
+    pause_final_countdown(game)
     game["round_results"] = None
     game["winner_summary"] = None
     game["action_log"] = []
@@ -472,9 +640,7 @@ def start_round(game):
         game["turn_index"] = 0
 
     game["status"] = "playing"
-    # The starting player is intentionally NOT marked here so they still get the opening
-    # peek at their two bottom cards until they take their first action. Nobody has acted
-    # yet, so their board can't have been altered — the peek is safe.
+    # Each player keeps their opening peek until they take their own first action.
     add_log(game, f"Round {game['round_number']} started. {player_name(game, current_sid(game))} goes first.")
 
 
@@ -484,7 +650,7 @@ def advance_turn(game):
         game["final_turns_remaining"].remove(previous_sid)
 
     if game["first_caller_sid"] and not game["final_turns_remaining"]:
-        finish_round(game)
+        refresh_final_countdown(game)
         return
 
     if not game["player_order"]:
@@ -501,7 +667,6 @@ def advance_turn(game):
     game["pending_draw"] = None
     game["pending_ability"] = None
     game["held_peek"] = None
-    mark_turn_started(game)
 
 
 def normalized_round_scores(raw_scores):
@@ -561,6 +726,7 @@ def finish_round(game):
     game["pending_ability"] = None
     game["pending_burn"] = None
     game["held_peek"] = None
+    pause_final_countdown(game)
     clear_burn_blockers(game)
     clear_last_action(game)
 
@@ -597,7 +763,7 @@ def protected_from_switch(game, actor_sid, owner_sid):
 
 
 def bot_config(player):
-    return BOT_CONFIG.get(player.get("difficulty"), BOT_CONFIG["medium"])
+    return player.get("bot_policy") or BOT_CONFIG.get(player.get("difficulty"), BOT_CONFIG["medium"])
 
 
 def live_slots_for(game, sid):
@@ -620,11 +786,11 @@ def all_switchable_slots(game, actor_sid):
     return slots
 
 
-def best_swap_slot(game, sid, new_card, difficulty):
+def best_swap_slot(game, sid, new_card, config):
     own_slots = live_slots_for(game, sid)
     if not own_slots:
         return None, 0
-    if difficulty == "easy" and random.random() < 0.28:
+    if random.random() < config["random_swap"]:
         index, slot = random.choice(own_slots)
         return index, slot["card"]["value"] - new_card["value"]
     index, slot = max(own_slots, key=lambda item: item[1]["card"]["value"])
@@ -735,7 +901,7 @@ def maybe_schedule_bot_burn(room):
     game = rooms.get(room)
     if not game or game["status"] != "playing" or game.get("pending_burn"):
         return
-    if game["phase"] not in {"choose", "ability"}:
+    if game["phase"] not in {"choose", "ability", "final_countdown"}:
         return
     if game.get("pending_draw"):
         return
@@ -789,7 +955,6 @@ def choose_bot_burn_candidate(game, top_card):
         if game.get("pending_draw") and game["pending_draw"].get("sid") == sid:
             continue
         player = game["players"][sid]
-        difficulty = player["difficulty"]
         config = bot_config(player)
         if random.random() < config["mistake"]:
             continue
@@ -804,11 +969,7 @@ def choose_bot_burn_candidate(game, top_card):
         if own_matches:
             index, slot = max(own_matches, key=lambda item: item[1]["card"]["value"])
             value = slot["card"]["value"]
-            if (
-                (difficulty == "easy" and value >= 9)
-                or (difficulty == "medium" and value >= 5)
-                or (difficulty == "hard" and value >= 1)
-            ):
+            if value >= config["burn_own_min"]:
                 return {"sid": sid, "owner_sid": sid, "index": index}
 
         give_slot = None
@@ -835,7 +996,7 @@ def choose_bot_burn_candidate(game, top_card):
         owner_sid, index, target_slot = min(opponent_matches, key=lambda item: item[2]["card"]["value"])
         give_value = give_slot[1]["card"]["value"]
         target_value = target_slot["card"]["value"]
-        threshold = {"easy": 99, "medium": 5, "hard": 0}[difficulty]
+        threshold = config["burn_opponent_gain"]
         if give_value - target_value >= threshold:
             return {"sid": sid, "owner_sid": owner_sid, "index": index}
     return None
@@ -942,6 +1103,7 @@ def perform_bot_burn_give(game, sid):
     own_slots = live_slots_for(game, sid)
     if not target_slot or not target_slot.get("card") or not own_slots:
         game["pending_burn"] = None
+        refresh_final_countdown(game)
         return
 
     give_index, give_slot = max(own_slots, key=lambda item: item[1]["card"]["value"])
@@ -971,23 +1133,20 @@ def perform_bot_burn_give(game, sid):
 
 def bot_should_call(game, sid):
     player = game["players"][sid]
-    difficulty = player["difficulty"]
+    config = bot_config(player)
     score = score_board(player["board"])
     cards = card_count(player["board"])
 
     if player["called"]:
         return False
     if game["first_caller_sid"]:
-        if difficulty == "easy":
-            return score <= -1 and random.random() < 0.35
-        if difficulty == "medium":
-            return score <= 5
-        return score <= 7
-    if difficulty == "easy":
-        return score <= -1 and random.random() < 0.45
-    if difficulty == "medium":
-        return score <= 1 or (cards <= 2 and score <= 4)
-    return score <= 0 or (cards <= 3 and score <= 3)
+        return score <= config["final_call_score"] and random.random() < config["final_call_rate"]
+    should_call = score <= config["call_score"] or (
+        config["call_card_count"] > 0
+        and cards <= config["call_card_count"]
+        and score <= config["call_card_score"]
+    )
+    return should_call and random.random() < config["call_rate"]
 
 
 def perform_bot_choose(game, sid):
@@ -1001,15 +1160,12 @@ def perform_bot_choose(game, sid):
 
     player = game["players"][sid]
     config = bot_config(player)
-    difficulty = player["difficulty"]
 
     if game["discard_pile"]:
         top_card = game["discard_pile"][-1]
-        _, gain = best_swap_slot(game, sid, top_card, difficulty)
+        _, gain = best_swap_slot(game, sid, top_card, config)
         should_take = gain >= config["discard_gain"]
-        if difficulty == "hard" and top_card["value"] <= 0 and gain >= 0:
-            should_take = True
-        if difficulty == "easy" and top_card["value"] <= 1 and gain > 0:
+        if top_card["value"] <= config["take_low_value"] and gain >= config["take_low_min_gain"]:
             should_take = True
         if random.random() < config["mistake"]:
             should_take = not should_take and random.random() < 0.4
@@ -1049,9 +1205,8 @@ def perform_bot_drawn(game, sid):
 
     player = game["players"][sid]
     config = bot_config(player)
-    difficulty = player["difficulty"]
     card = pending["card"]
-    index, gain = best_swap_slot(game, sid, card, difficulty)
+    index, gain = best_swap_slot(game, sid, card, config)
 
     if pending["source"] == "discard":
         if index is not None:
@@ -1132,7 +1287,7 @@ def perform_bot_put_back(game, sid):
         peek.get("burnable")
         and game["discard_pile"]
         and burn_matches(game["discard_pile"][-1], peek["card"])
-        and bot_config(game["players"][sid])["ability_rate"] > 0.5
+        and random.random() < bot_config(game["players"][sid])["peek_burn_rate"]
     ):
         owner_sid = peek["owner_sid"]
         index = peek["index"]
@@ -1288,14 +1443,15 @@ def begin_held_peek(game, viewer_sid, owner_sid, index):
 
 def choose_bot_switch_pair(game, sid, can_peek):
     player = game["players"][sid]
-    difficulty = player["difficulty"]
+    config = bot_config(player)
     slots = all_switchable_slots(game, sid)
     if len(slots) < 2:
         return None
 
-    if difficulty == "easy":
+    if random.random() < config["switch_random_rate"]:
         first, second = random.sample(slots, 2)
-        return ((first[0], first[1]), (second[0], second[1]), random.random() < 0.55)
+        should_switch = random.random() < config["switch_execute_rate"]
+        return ((first[0], first[1]), (second[0], second[1]), should_switch)
 
     own_slots = [(sid, index, slot) for index, slot in live_slots_for(game, sid)]
     opponent_slots = [
@@ -1305,23 +1461,20 @@ def choose_bot_switch_pair(game, sid, can_peek):
     ]
     if not own_slots or not opponent_slots:
         first, second = random.sample(slots, 2)
-        return ((first[0], first[1]), (second[0], second[1]), can_peek and random.random() < 0.5)
+        should_switch = can_peek and random.random() < config["switch_execute_rate"]
+        return ((first[0], first[1]), (second[0], second[1]), should_switch)
 
     own_high = max(own_slots, key=lambda item: item[2]["card"]["value"])
-    if difficulty == "medium":
+    if random.random() < config["switch_target_lowest"]:
+        opponent_choice = min(opponent_slots, key=lambda item: item[2]["card"]["value"])
+        should_switch = own_high[2]["card"]["value"] > opponent_choice[2]["card"]["value"]
+    else:
         opponent_choice = random.choice(opponent_slots)
-        should_switch = own_high[2]["card"]["value"] >= 8
-        return (
-            (own_high[0], own_high[1]),
-            (opponent_choice[0], opponent_choice[1]),
-            should_switch,
-        )
-
-    opponent_low = min(opponent_slots, key=lambda item: item[2]["card"]["value"])
-    should_switch = own_high[2]["card"]["value"] > opponent_low[2]["card"]["value"]
+        should_switch = own_high[2]["card"]["value"] >= config["switch_own_min"]
+    should_switch = should_switch and random.random() < config["switch_execute_rate"]
     return (
         (own_high[0], own_high[1]),
-        (opponent_low[0], opponent_low[1]),
+        (opponent_choice[0], opponent_choice[1]),
         should_switch,
     )
 
@@ -1349,6 +1502,7 @@ def on_join(data):
         rooms[room] = new_room(request.sid)
 
     game = rooms[room]
+    game["room_id"] = room
     if request.sid not in game["players"]:
         game["players"][request.sid] = make_player(username)
         game["player_order"].append(request.sid)
@@ -1366,6 +1520,7 @@ def on_join(data):
             room,
             data.get("bot_count", 2),
             data.get("bot_difficulty", "medium"),
+            data.get("bot_policy"),
         )
         game["players"][request.sid]["ready"] = True
         start_round(game)
@@ -1997,6 +2152,7 @@ def on_finish_burn_give(data):
         or target_slot["card"]["id"] != pending["target_card_id"]
     ):
         game["pending_burn"] = None
+        refresh_final_countdown(game)
         emit_error("That burn target changed.")
         emit_state(room)
         return

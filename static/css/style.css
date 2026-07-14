@@ -415,56 +415,61 @@ input {
 }
 
 .table-3d {
-    --table-tilt: 20deg;
-    --table-perspective: 1800px;
-    perspective: var(--table-perspective);
-    perspective-origin: 50% 45%;
+    --camera-focal: 1476px;
+    --camera-pitch: 28.3008deg;
+    --table-center-y: 350px;
+    --table-world-depth: 700px;
+    --table-world-width: 1200px;
+    --card-width: 63px;
+    --card-height: 88px;
+    --card-gap: 7px;
+    --grid-width-2: 133px;
+    --grid-width-3: 203px;
+    height: 100%;
+    perspective: var(--camera-focal);
+    perspective-origin: 50% var(--table-center-y);
     position: relative;
     width: 100%;
 }
 
 .table-stage {
-    height: min(calc(100vh - 64px), 1040px);
+    height: 100%;
     margin: 0 auto;
-    max-width: 1280px;
+    max-width: 1500px;
+    min-height: 610px;
     overflow: visible;
-    padding: 12px 28px 80px;
     position: relative;
     transform-style: preserve-3d;
     width: 100%;
+    z-index: 1;
 }
 
 .table-surface {
-    bottom: 16%;
-    left: 4%;
+    height: var(--table-world-depth);
+    left: calc(50% - var(--table-world-width) / 2);
     overflow: visible;
     position: absolute;
-    right: 4%;
-    top: 4%;
-    transform: rotateX(var(--table-tilt));
-    transform-origin: 50% 50%;
+    top: calc(var(--table-center-y) - var(--table-world-depth) / 2);
+    transform: rotateX(var(--camera-pitch));
+    transform-origin: center center;
     transform-style: preserve-3d;
+    width: var(--table-world-width);
     z-index: 2;
 }
 
-/* Legs behind the felt in 3D depth — no rectangular clip (that chopped them) */
 .table-legs {
-    bottom: 0;
-    left: 0;
+    inset: 0;
     overflow: visible;
     pointer-events: none;
     position: absolute;
-    right: 0;
-    top: 0;
-    transform: translateZ(-90px);
     z-index: 0;
 }
 
 .table-leg {
-    height: 150px;
+    height: var(--leg-height, 140px);
     position: absolute;
-    top: 78%;
-    width: 58px;
+    top: var(--leg-top, 70%);
+    width: var(--leg-width, 90px);
 }
 
 .table-leg svg {
@@ -474,71 +479,82 @@ input {
     width: 100%;
 }
 
-.table-leg path {
-    filter: drop-shadow(2px 8px 10px rgba(0, 0, 0, 0.45));
+.table-leg .leg-core {
+    fill: none;
+    filter: drop-shadow(3px 10px 9px rgba(0, 0, 0, 0.52));
+    stroke: #512b13;
+    stroke-linecap: round;
+    stroke-width: 28px;
+}
+
+.table-leg .leg-highlight {
+    fill: none;
+    opacity: 0.42;
+    stroke: #b97a42;
+    stroke-linecap: round;
+    stroke-width: 5px;
 }
 
 .table-leg.fl {
-    left: 36%;
+    left: var(--leg-left-x, 40%);
     transform: translateX(-50%);
 }
 
 .table-leg.fr {
-    left: 64%;
+    left: var(--leg-right-x, 60%);
     transform: translateX(-50%);
 }
 
 .felt {
     background:
-        radial-gradient(ellipse at 50% 28%, rgba(255, 220, 160, 0.18), transparent 42%),
-        radial-gradient(ellipse at 50% 48%, #8b5a2b 0%, #6e4320 42%, #4a2c14 78%, #2f1a0c 100%);
-    border: 14px solid #3a2414;
+        radial-gradient(ellipse at 50% 18%, rgba(255, 223, 168, 0.24), transparent 44%),
+        repeating-radial-gradient(ellipse at 46% 48%, transparent 0 32px, rgba(45, 20, 7, 0.045) 34px 36px, transparent 39px 61px),
+        repeating-linear-gradient(3deg, rgba(255, 213, 150, 0.03) 0 1px, transparent 1px 15px),
+        linear-gradient(165deg, #9a6334 0%, #75451f 46%, #4b2912 100%);
+    border: 16px solid #3b2110;
     border-radius: 50%;
     box-shadow:
-        0 0 0 3px rgba(0, 0, 0, 0.3),
-        0 22px 40px rgba(0, 0, 0, 0.42),
-        inset 0 0 60px rgba(0, 0, 0, 0.35);
-    /* Inset so the projected ellipse doesn't get clipped into flat top/left cuts */
-    inset: 3% 5%;
+        0 0 0 4px #241309,
+        0 20px 28px rgba(0, 0, 0, 0.46),
+        inset 0 0 0 5px rgba(196, 128, 69, 0.18),
+        inset 0 -30px 55px rgba(31, 13, 4, 0.34);
+    inset: 0;
     position: absolute;
+    transform: translateZ(-1px);
+    z-index: 2;
 }
 
 .table-center-piles {
     align-items: center;
     display: flex;
     flex-direction: row;
-    gap: 22px;
+    gap: calc(var(--world-scale) * 0.22);
     left: 50%;
     pointer-events: none;
     position: absolute;
     top: 50%;
-    transform: translate(-50%, -50%) translateZ(6px);
+    transform: translate(-50%, -50%);
     z-index: 40;
 }
 
 .pile {
-    align-items: center;
-    display: grid;
-    gap: 6px;
-    grid-template-rows: auto 22px;
-    justify-items: center;
+    display: block;
     position: relative;
     z-index: 40;
 }
 
 .pile .pile-card {
     cursor: pointer;
-    grid-row: 1;
     pointer-events: auto;
     position: relative;
-    transform: translateZ(4px);
     z-index: 41;
 }
 
 .pile .pile-count {
-    grid-row: 2;
-    transform: rotateX(calc(-1 * var(--table-tilt)));
-    transform-origin: center top;
+    left: 50%;
+    position: absolute;
+    top: calc(100% + 6px);
+    transform: translateX(-50%);
 }
 
 /* Screen-flat AR labels near the piles (not painted onto the tilted felt) */
@@ -560,6 +576,23 @@ input {
 
 .ar-labels .prompt-label.is-placed {
     visibility: visible;
+}
+
+.hand-overlays {
+    inset: 0;
+    pointer-events: none;
+    position: absolute;
+    z-index: 35;
+}
+
+.hand-overlays .held-slot,
+.hand-overlays .held-slot.hand-tray,
+.hand-overlays .held-slot.filled:not(.hand-tray) {
+    margin: 0;
+    pointer-events: auto;
+    transform: translate(-50%, -50%) rotateZ(var(--hand-yaw, 0deg)) scale(var(--hand-depth-scale, 1));
+    transform-origin: 50% 50%;
+    transform-style: flat;
 }
 
 .draw-pile .pile-card {
@@ -613,8 +646,8 @@ input {
 }
 
 .pile-card {
-    height: 112px;
-    width: 80px;
+    height: var(--card-height);
+    width: var(--card-width);
 }
 
 .playing-card,
@@ -637,9 +670,8 @@ input {
 .board-card.face-up {
     background: linear-gradient(180deg, #fffdf6, #f3e8c8);
     box-shadow:
-        var(--shadow-x, 0px) var(--shadow-y, 8px) 0 rgba(0, 0, 0, 0.12),
-        var(--shadow-x, 0px) var(--shadow-y, 8px) 9px rgba(0, 0, 0, 0.26),
-        var(--shadow-x, 0px) calc(var(--shadow-y, 8px) * 1.4) 16px rgba(0, 0, 0, 0.12);
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 0 rgba(0, 0, 0, 0.1),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 7px rgba(0, 0, 0, 0.22);
     color: var(--ink);
 }
 
@@ -669,9 +701,8 @@ input {
         linear-gradient(160deg, #2f7eb8, #1a4f7a);
     border: 2px solid rgba(255, 255, 255, 0.5);
     box-shadow:
-        var(--shadow-x, 0px) var(--shadow-y, 8px) 0 rgba(0, 0, 0, 0.14),
-        var(--shadow-x, 0px) var(--shadow-y, 8px) 9px rgba(0, 0, 0, 0.28),
-        var(--shadow-x, 0px) calc(var(--shadow-y, 8px) * 1.4) 14px rgba(0, 0, 0, 0.14);
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 0 rgba(0, 0, 0, 0.12),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 7px rgba(0, 0, 0, 0.24);
     color: white;
 }
 
@@ -696,11 +727,26 @@ input {
     min-height: 96px;
     min-width: 64px;
     padding: 6px;
-    transform: translate(-100%, -50%) rotateZ(calc(var(--seat-yaw) * -1));
+    transform: translate(-100%, -50%) rotateX(-68deg) translateZ(calc(var(--world-scale) * 0.10));
+    transform-origin: 50% 100%;
+    transform-style: flat;
 }
 
 .held-slot.filled:not(.hand-tray) .held-card.hand-lift {
     transform: translateY(-8px);
+}
+
+.held-slot.bot-hand {
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    min-height: 0;
+    min-width: 0;
+    padding: 0;
+}
+
+.held-slot.bot-hand .held-card.hand-lift {
+    transform: none;
 }
 
 .card-corner {
@@ -754,12 +800,10 @@ input {
     pointer-events: auto;
     position: absolute;
     top: var(--seat-top);
-    transform:
-        translate3d(-50%, -50%, 2px)
-        rotateZ(var(--seat-yaw));
+    transform: translate(-50%, -50%) rotateZ(var(--seat-yaw));
     transform-origin: 50% 50%;
     transform-style: preserve-3d;
-    width: 132px;
+    width: var(--seat-width, var(--grid-width-2));
     z-index: 12;
 }
 
@@ -771,33 +815,12 @@ input {
 }
 
 .seat.me {
-    width: 140px;
     z-index: 14;
-}
-
-.seats[data-count="5"] .seat,
-.seats[data-count="6"] .seat {
-    width: 118px;
-}
-
-.seats[data-count="5"] .seat.me,
-.seats[data-count="6"] .seat.me {
-    width: 128px;
-}
-
-.seats[data-count="5"] .card-grid,
-.seats[data-count="6"] .card-grid {
-    gap: 5px;
-    width: 112px;
-}
-
-.seats[data-count="5"] .seat.me .card-grid,
-.seats[data-count="6"] .seat.me .card-grid {
-    width: 120px;
 }
 
 .seat-board {
     position: relative;
+    transform-style: preserve-3d;
     width: 100%;
 }
 
@@ -806,36 +829,33 @@ input {
     align-items: center;
     display: flex;
     flex-direction: column;
-    gap: 4px;
+    gap: calc(var(--world-scale) * 0.04);
     left: 0;
-    margin-left: -14px;
+    margin-left: calc(var(--world-scale) * -0.14);
     position: absolute;
     top: 50%;
-    transform: translate(-100%, -50%);
+    transform: translate(-100%, -50%) rotateX(-68deg) translateZ(calc(var(--world-scale) * 0.10));
+    transform-origin: 50% 100%;
+    transform-style: flat;
     z-index: 5;
 }
 
 .held-slot.empty {
-    min-height: 72px;
-    opacity: 0;
-    pointer-events: none;
-    width: 48px;
+    display: none;
 }
 
 .held-slot.hand-tray {
     background: rgba(0, 0, 0, 0.4);
     border: 1px dashed rgba(255, 220, 140, 0.45);
     border-radius: 10px;
-    min-height: 110px;
-    min-width: 72px;
+    min-height: calc(var(--world-scale) * 1.10);
+    min-width: calc(var(--world-scale) * 0.72);
     opacity: 1;
     padding: 6px 8px 8px;
     pointer-events: auto;
-    /* Keep tray screen-flat so the held card doesn't warp/vanish */
-    transform:
-        translate(-100%, -50%)
-        rotateZ(calc(var(--seat-yaw) * -1));
-    transform-origin: center center;
+    transform: translate(-100%, -50%) rotateX(-68deg) translateZ(calc(var(--world-scale) * 0.10));
+    transform-origin: 50% 100%;
+    transform-style: flat;
 }
 
 .held-slot.empty-tray .held-card {
@@ -851,15 +871,15 @@ input {
 }
 
 .held-card {
-    height: 84px;
-    width: 60px;
+    height: var(--card-height);
+    width: var(--card-width);
 }
 
 .held-card.hand-lift {
     box-shadow:
-        0 4px 0 rgba(0, 0, 0, 0.18),
-        0 10px 18px rgba(0, 0, 0, 0.4);
-    transform: translateY(-6px);
+        0 3px 0 rgba(0, 0, 0, 0.14),
+        0 8px 12px rgba(0, 0, 0, 0.3);
+    transform: translateY(-4px);
 }
 
 .held-actions {
@@ -870,25 +890,25 @@ input {
 
 .card-grid {
     display: grid;
-    gap: 7px;
+    gap: var(--card-gap);
     grid-template-columns: repeat(2, 1fr);
     margin: 0 auto;
     pointer-events: auto;
-    width: 132px;
+    width: var(--grid-width-2);
 }
 
 .card-grid.cols-3 {
     grid-template-columns: repeat(3, 1fr);
-    width: 198px;
+    width: var(--grid-width-3);
 }
 
 .seat.me .card-grid {
-    gap: 7px;
-    width: 140px;
+    gap: var(--card-gap);
+    width: var(--grid-width-2);
 }
 
 .seat.me .card-grid.cols-3 {
-    width: 210px;
+    width: var(--grid-width-3);
 }
 
 .table-stage.card-cursor,
@@ -897,12 +917,11 @@ input {
 }
 
 .board-card {
-    aspect-ratio: 0.72;
+    height: var(--card-height);
     cursor: pointer;
     pointer-events: auto;
     touch-action: manipulation;
-    /* Promote to its own plane so 3D hit-testing is more reliable */
-    transform: translateZ(1px);
+    transform: translateZ(0);
     transition: transform 0.15s ease, box-shadow 0.15s ease, outline 0.15s ease, filter 0.15s ease;
     width: 100%;
 }
@@ -918,12 +937,11 @@ input {
 .board-card.opening-peek:hover {
     box-shadow:
         0 0 0 3px #ffe08a,
-        0 14px 22px rgba(0, 0, 0, 0.5);
+        0 8px 13px rgba(0, 0, 0, 0.42);
     filter: brightness(1.18) saturate(1.08);
     outline: 3px solid #ffe08a;
     outline-offset: 3px;
-    /* Stay coplanar — only lift slightly along table normal / slide */
-    transform: translateZ(6px) translateY(-6px) scale(1.04);
+    transform: translateZ(1px) translateY(-3px) scale(1.035);
     z-index: 3;
 }
 
@@ -1018,6 +1036,31 @@ input {
     transform-origin: center center;
     will-change: left, top, transform, width, height;
     z-index: 81;
+}
+
+.board-card.looked-mark {
+    box-shadow: 0 0 0 3px #38a8ff, 0 0 18px rgba(56, 168, 255, 0.82);
+    outline: 2px solid #8fd2ff;
+    outline-offset: 3px;
+}
+
+.board-card.switched-mark {
+    box-shadow: 0 0 0 3px #a855f7, 0 0 19px rgba(168, 85, 247, 0.86);
+    outline: 2px solid #d8b4fe;
+    outline-offset: 3px;
+}
+
+.fly-card.plane-flight {
+    height: var(--card-height);
+    left: 50%;
+    pointer-events: none;
+    position: absolute;
+    top: 50%;
+    transform-origin: center center;
+    transform-style: flat;
+    width: var(--card-width);
+    will-change: transform;
+    z-index: 100;
 }
 
 .fly-card .flying-face,
@@ -1187,30 +1230,107 @@ input {
     }
 
     .table-3d {
-        perspective: none;
+        margin-right: 0;
+        width: 100%;
     }
 
     .table-stage {
-        height: auto;
-        min-height: 560px;
-    }
-
-    .table-surface {
-        transform: none;
+        height: 620px;
+        min-height: 620px;
     }
 
     .side-panel {
-        margin: 8px auto 0;
-        position: static;
-        width: min(280px, 100%);
+        align-items: center;
+        bottom: 8px;
+        flex-direction: row;
+        left: 8px;
+        padding: 8px;
+        position: fixed;
+        right: 8px;
+        top: auto;
+        width: auto;
+        z-index: 60;
     }
 
     .topbar {
-        grid-template-columns: 1fr;
-        text-align: center;
+        gap: 6px;
+        grid-template-columns: auto minmax(0, 1fr) auto;
+        padding: 6px 8px;
     }
 
-    .seat.me {
-        width: 160px;
+    .topbar .small-btn {
+        min-height: 34px;
+        padding: 7px 9px;
+    }
+
+    .topbar .room-pill {
+        max-width: 64px;
+        text-align: right;
+    }
+
+    .action-hint {
+        font-size: 0.65rem;
+        max-width: 210px;
+    }
+
+    .turn-box strong {
+        font-size: 0.82rem;
+    }
+
+    .side-panel-title {
+        display: none;
+    }
+
+    .score-chips {
+        flex: 1;
+        flex-direction: row;
+        min-width: 0;
+        overflow-x: auto;
+    }
+
+    .score-chip {
+        flex: 0 0 88px;
+        padding: 5px 7px;
+    }
+
+    .score-name {
+        max-width: 58px;
+    }
+
+    .call-btn {
+        flex: 0 0 78px;
+        min-height: 38px;
+        width: 78px;
+    }
+
+    .table-center-piles {
+        gap: calc(var(--world-scale) * 0.16);
+    }
+
+    #draw-prompt,
+    #take-prompt {
+        display: none;
+    }
+
+    .draw-pile .pile-card::before {
+        align-items: center;
+        content: "DRAW";
+        display: flex;
+        font-size: 0.44rem;
+        inset: 0;
+        justify-content: center;
+        position: absolute;
+    }
+
+    .held-slot.hand-tray.empty-tray {
+        display: none;
+    }
+
+    .nameplates {
+        display: none;
+    }
+
+    .pile-card {
+        font-size: 0.42rem;
     }
 }

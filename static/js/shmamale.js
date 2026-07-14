@@ -4,7 +4,10 @@ const socket = (typeof io !== "undefined")
     ? io()
     : { emit() {}, on() {} };
 
-const ANIM_MS = 1000;
+const ANIM_MS = 520;
+const PICKUP_ANIM_MS = 520;
+const CENTER_ANIM_MS = 760;
+const SWITCH_ANIM_MS = 620;
 
 let mySid = "";
 let myUsername = "";
@@ -16,6 +19,14 @@ let lastActionKey = "";
 let animating = false;
 /** @type {{sid: string, index: number, untilTurnSid: string}|null} */
 let swapMark = null;
+let recentCardMarks = {
+    looked: [],
+    switched: [],
+    createdBySid: "",
+    throughTurnSid: "",
+};
+let stateUpdateQueue = Promise.resolve();
+let finalCountdownEndsAt = 0;
 
 const els = {};
 
@@ -29,6 +40,7 @@ document.addEventListener("DOMContentLoaded", () => {
     bindCardPointerFallback();
     applyTableCameraSettings();
     initializeGameMode();
+    window.setInterval(updateCountdownText, 100);
     window.addEventListener("resize", () => {
         if (!state) return;
         applyTableCameraSettings();
@@ -52,13 +64,22 @@ socket.on("disconnect", () => {
     setConnBanner("Disconnected — trying to reconnect…", false);
 });
 
-socket.on("game_state", async (nextState) => {
+socket.on("game_state", (nextState) => {
+    stateUpdateQueue = stateUpdateQueue
+        .then(() => applyGameState(nextState))
+        .catch((error) => {
+            console.error("State update failed", error);
+            animating = false;
+        });
+});
+
+async function applyGameState(nextState) {
     if (nextState.viewer_sid) {
         mySid = nextState.viewer_sid;
     }
     const action = nextState.last_action;
     const actionKey = action
-        ? `${action.type}:${action.epoch}:${action.sid || ""}:${action.index ?? ""}:${action.owner_sid || ""}`
+        ? `${action.id ?? `${action.type}:${action.epoch}:${action.sid || ""}:${action.index ?? ""}:${action.owner_sid || ""}`}`
         : "";
 
     // Capture DOM anchors from the current board before we replace it.
@@ -66,7 +87,11 @@ socket.on("game_state", async (nextState) => {
 
     prevState = state;
     state = nextState;
+    finalCountdownEndsAt = Number.isFinite(nextState.final_countdown_ends_at)
+        ? nextState.final_countdown_ends_at
+        : 0;
     updateSwapMark(action, nextState);
+    updateRecentCardMarks(action, actionKey, nextState);
 
     if (action && actionKey !== lastActionKey) {
         lastActionKey = actionKey;
@@ -85,7 +110,7 @@ socket.on("game_state", async (nextState) => {
         return;
     }
     render();
-});
+}
 
 socket.on("error_message", (data) => {
     showToast(data.msg || "Something went wrong.");
@@ -141,6 +166,7 @@ function cacheEls() {
     els.playPrompt = document.getElementById("play-prompt");
     els.callBtn = document.getElementById("call-btn");
     els.seats = document.getElementById("seats");
+    els.hands = document.getElementById("hand-overlays");
     els.nameplates = document.getElementById("nameplates");
     els.flyLayer = document.getElementById("fly-layer");
     els.abilityOverlay = document.getElementById("ability-overlay");
@@ -299,7 +325,50 @@ function joinGame(username, options = {}) {
         bot_mode: Boolean(options.botMode),
         bot_count: options.botCount || 0,
         bot_difficulty: options.botDifficulty || "medium",
+        bot_policy: options.botPolicy || null,
     });
+}
+
+function emptyRecentCardMarks() {
+    return { looked: [], switched: [], createdBySid: "", throughTurnSid: "" };
+}
+
+function updateRecentCardMarks(action, actionKey, nextState) {
+    const hasMarks = recentCardMarks.looked.length || recentCardMarks.switched.length;
+    if (hasMarks) {
+        const currentSid = nextState.current_turn_sid || "";
+        if (!recentCardMarks.throughTurnSid && currentSid !== recentCardMarks.createdBySid) {
+            recentCardMarks.throughTurnSid = currentSid;
+        } else if (recentCardMarks.throughTurnSid && currentSid !== recentCardMarks.throughTurnSid) {
+            recentCardMarks = emptyRecentCardMarks();
+        }
+    }
+    if (nextState.status === "round_over" || nextState.status === "game_over") {
+        recentCardMarks = emptyRecentCardMarks();
+        return;
+    }
+    if (!action || !actionKey || actionKey === lastActionKey) return;
+    if (action.type === "switch" && action.a && action.b) {
+        recentCardMarks = {
+            looked: [],
+            switched: [action.a, action.b],
+            createdBySid: action.sid || "",
+            throughTurnSid: nextState.current_turn_sid !== action.sid
+                ? nextState.current_turn_sid || ""
+                : "",
+        };
+        return;
+    }
+    if (action.type === "peek" && action.owner_sid != null && action.index != null) {
+        recentCardMarks = {
+            looked: [{ owner_sid: action.owner_sid, index: action.index }],
+            switched: [],
+            createdBySid: action.sid || "",
+            throughTurnSid: nextState.current_turn_sid !== action.sid
+                ? nextState.current_turn_sid || ""
+                : "",
+        };
+    }
 }
 
 function render(options = {}) {
@@ -363,6 +432,10 @@ function renderGame(options = {}) {
 function phaseText() {
     if (state.status === "round_over") return "Round over";
     if (state.status === "game_over") return "Game over";
+    if (state.phase === "final_countdown") {
+        const seconds = Math.max(0, Math.ceil((finalCountdownEndsAt - Date.now()) / 1000));
+        return seconds > 0 ? `Round ends in ${seconds}` : "Finishing round...";
+    }
     if (state.first_caller_sid) {
         return `${state.players[state.first_caller_sid]?.username || "Someone"} called — final turns`;
     }
@@ -370,6 +443,11 @@ function phaseText() {
     if (state.phase === "drawn") return "Holding a card";
     if (state.phase === "ability") return "Special ability";
     return `Round ${state.round_number}`;
+}
+
+function updateCountdownText() {
+    if (!state || state.phase !== "final_countdown" || !els.phaseText) return;
+    els.phaseText.textContent = phaseText();
 }
 
 function renderScores() {
@@ -437,8 +515,10 @@ function renderPiles() {
 /** Place draw/take/play as screen-flat HUD text just above each pile card. */
 function layoutArLabels() {
     const stage = document.querySelector(".table-stage");
-    if (!stage || !els.drawPrompt) return;
+    const overlay = document.querySelector(".ar-labels");
+    if (!stage || !overlay || !els.drawPrompt) return;
     const stageRect = stage.getBoundingClientRect();
+    const overlayRect = overlay.getBoundingClientRect();
     if (stageRect.width < 8) return;
 
     const placeAbove = (btn, cardEl, xOffset = 0) => {
@@ -450,8 +530,8 @@ function layoutArLabels() {
         const r = cardEl.getBoundingClientRect();
         const cx = r.left + r.width / 2 + xOffset;
         const top = r.top - 8;
-        btn.style.left = `${((cx - stageRect.left) / stageRect.width) * 100}%`;
-        btn.style.top = `${((top - stageRect.top) / stageRect.height) * 100}%`;
+        btn.style.left = `${(cx - overlayRect.left).toFixed(2)}px`;
+        btn.style.top = `${(top - overlayRect.top).toFixed(2)}px`;
         btn.classList.add("is-placed");
     };
 
@@ -515,14 +595,30 @@ function rotatedOrder() {
 
 /**
  * Table camera / seat layout.
- * CSS owns perspective + rotateX. Seats only translate + rotateZ (flat on felt).
- * Yaw is computed from FINAL left/top in untransformed surface pixels — not from azimuth.
+ * CSS owns perspective + rotateX(15deg). Seats live inside that plane, so
+ * cards and their shadows are coplanar with the felt. Labels/nameplates are
+ * positioned later in screen space.
  */
 const TABLE = {
-    rim: 0.5,
-    tiltDeg: 20,
-    perspectivePx: 1800,
+    width: 12,
+    depth: 7,
+    cameraDistance: 7,
+    cameraHeight: 13,
+    cardWidth: 0.70,
+    cardHeight: 0.98,
+    cardGap: 0.08,
+    rimFraction: 0.925,
+    ringByCount: {
+        2: 0.70,
+        3: 0.72,
+        4: 0.73,
+        5: 0.74,
+        6: 0.75,
+    },
 };
+
+TABLE.cameraLength = Math.hypot(TABLE.cameraDistance, TABLE.cameraHeight);
+TABLE.pitch = Math.atan2(TABLE.cameraDistance, TABLE.cameraHeight);
 
 /** Azimuth rings for placement only (0 = local/near). Yaw is computed separately. */
 const SEAT_AZIMUTHS = {
@@ -539,74 +635,173 @@ function shortestDeg(deg) {
 
 function applyTableCameraSettings() {
     const table3d = document.querySelector(".table-3d");
-    if (!table3d) return;
-    table3d.style.setProperty("--table-tilt", `${TABLE.tiltDeg}deg`);
-    table3d.style.setProperty("--table-perspective", `${TABLE.perspectivePx}px`);
+    const stage = document.querySelector(".table-stage");
+    if (!table3d || !stage) return null;
+
+    const stageWidth = Math.max(320, stage.clientWidth);
+    const stageHeight = Math.max(420, stage.clientHeight);
+    const topClearance = stageWidth < 700 ? 34 : 42;
+    const legReserve = stageWidth < 700 ? 74 : 122;
+    const l = TABLE.cameraLength;
+    const d = TABLE.cameraDistance;
+    const h = TABLE.cameraHeight;
+    const b = TABLE.depth / 2;
+    const nearPerUnit = h * l * b / (l * l - d * b);
+    const farPerUnit = h * l * b / (l * l + d * b);
+    const unitByWidth = stageWidth * 0.92 / TABLE.width;
+    const unitByHeight = (stageHeight - topClearance - legReserve) / (nearPerUnit + farPerUnit);
+    const scale = Math.max(24, Math.min(110, unitByWidth, unitByHeight));
+    const centerY = topClearance + farPerUnit * scale;
+    const cardWidth = TABLE.cardWidth * scale;
+    const cardHeight = TABLE.cardHeight * scale;
+    const gap = TABLE.cardGap * scale;
+
+    const vars = {
+        "--world-scale": `${scale.toFixed(3)}px`,
+        "--camera-focal": `${(scale * l).toFixed(3)}px`,
+        "--camera-pitch": `${(TABLE.pitch * 180 / Math.PI).toFixed(4)}deg`,
+        "--table-center-y": `${centerY.toFixed(3)}px`,
+        "--table-world-width": `${(TABLE.width * scale).toFixed(3)}px`,
+        "--table-world-depth": `${(TABLE.depth * scale).toFixed(3)}px`,
+        "--card-width": `${cardWidth.toFixed(3)}px`,
+        "--card-height": `${cardHeight.toFixed(3)}px`,
+        "--card-gap": `${gap.toFixed(3)}px`,
+        "--grid-width-2": `${(cardWidth * 2 + gap).toFixed(3)}px`,
+        "--grid-width-3": `${(cardWidth * 3 + gap * 2).toFixed(3)}px`,
+    };
+    const handLayer = document.querySelector(".hand-overlays");
+    Object.entries(vars).forEach(([name, value]) => {
+        table3d.style.setProperty(name, value);
+        handLayer?.style.setProperty(name, value);
+    });
+    table3d.dataset.worldScale = scale.toFixed(4);
+    table3d.dataset.cameraLength = l.toFixed(4);
+    table3d.dataset.projectedNearFarRatio = ((l * l + d * b) / (l * l - d * b)).toFixed(4);
+    requestAnimationFrame(layoutTableLegs);
+    return { scale, centerY };
+}
+
+function projectWorldPoint(x, y) {
+    const table3d = document.querySelector(".table-3d");
+    const stage = document.querySelector(".table-stage");
+    if (!table3d || !stage) return null;
+    const scale = Number(table3d?.dataset.worldScale);
+    const centerY = parseFloat(getComputedStyle(table3d).getPropertyValue("--table-center-y"));
+    if (!scale || !Number.isFinite(centerY)) return null;
+    const focal = scale * TABLE.cameraLength;
+    const denominator = focal - scale * y * Math.sin(TABLE.pitch);
+    return {
+        x: stage.clientWidth / 2 + focal * scale * x / denominator,
+        y: centerY + focal * scale * y * Math.cos(TABLE.pitch) / denominator,
+    };
 }
 
 /**
  * CSS rotateZ whose local "top" points from the seat toward table center.
  * Uses clientWidth/Height (unprojected), never getBoundingClientRect().
  */
-function yawTowardTableCenter(leftPct, topPct, surfaceElement) {
-    const width = surfaceElement?.clientWidth || 0;
-    const height = surfaceElement?.clientHeight || 0;
-    if (!width || !height) return 0;
-    const dx = ((50 - leftPct) / 100) * width;
-    const dy = ((50 - topPct) / 100) * height;
-    // Local seat top starts as (0, -1). Positive CSS rotateZ is clockwise.
-    return shortestDeg((Math.atan2(dx, -dy) * 180) / Math.PI);
+function gridColsForBoard(boardLength) {
+    return boardLength <= 4 ? 2 : Math.min(3, Math.ceil(boardLength / 2));
 }
 
-function clampSeatLeft(left) {
-    return Math.max(24, Math.min(76, left));
+function seatDensityScale(count) {
+    if (count >= 6) return 0.80;
+    if (count >= 5) return 0.84;
+    if (count >= 4) return 0.91;
+    return 1;
 }
 
-function clampSeatTop(top, isLocal) {
-    let t = Math.max(24, Math.min(68, top));
-    if (isLocal) t = Math.min(t, 66);
-    return t;
+function boardFootprintWorld(count, sid, isLocal, scale) {
+    const player = state?.players?.[sid];
+    const boardLength = player?.board?.length || 4;
+    const cols = gridColsForBoard(boardLength);
+    const rows = Math.max(1, Math.ceil(boardLength / cols));
+    const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
+    const boardHeight = rows * TABLE.cardHeight + (rows - 1) * TABLE.cardGap;
+
+    return {
+        xMin: (-boardWidth / 2) * scale,
+        xMax: (boardWidth / 2) * scale,
+        yMin: (-boardHeight / 2) * scale,
+        yMax: (boardHeight / 2) * scale,
+    };
+}
+
+function seatPoseAt(phi, ring) {
+    const center = {
+        x: TABLE.width / 2 * ring * Math.cos(phi),
+        y: TABLE.depth / 2 * ring * Math.sin(phi),
+    };
+    const length = Math.hypot(center.x, center.y) || 1;
+    return { center, outward: { x: center.x / length, y: center.y / length } };
 }
 
 /** Density scale by player count only — never by camera depth. */
-function densityScale(count, isLocal) {
-    if (isLocal) return count >= 5 ? 1.0 : 1.03;
-    if (count >= 6) return 0.84;
-    if (count >= 5) return 0.86;
-    if (count >= 4) return 0.9;
-    return 0.92;
+function footprintInsideEllipse(center, outward, footprint) {
+    const tangent = { x: outward.y, y: -outward.x };
+    const a = TABLE.width / 2 * TABLE.rimFraction;
+    const b = TABLE.depth / 2 * TABLE.rimFraction;
+    return [footprint.xMin, footprint.xMax].every((lx) => (
+        [footprint.yMin, footprint.yMax].every((ly) => {
+            const x = center.x + tangent.x * lx + outward.x * ly;
+            const y = center.y + tangent.y * lx + outward.y * ly;
+            return (x / a) ** 2 + (y / b) ** 2 <= 1;
+        })
+    ));
 }
 
-function seatLayout(count) {
-    const n = Math.max(2, Math.min(6, count || 2));
+function solveSeatRing(phi, requested, footprint) {
+    let low = 0.40;
+    let high = requested;
+    for (let i = 0; i < 24; i += 1) {
+        const mid = (low + high) / 2;
+        const pose = seatPoseAt(phi, mid);
+        if (footprintInsideEllipse(pose.center, pose.outward, footprint)) low = mid;
+        else high = mid;
+    }
+    return { ring: low, ...seatPoseAt(phi, low) };
+}
+
+function seatLayout(order) {
+    const n = Math.max(2, Math.min(6, order.length || 2));
     const azList = SEAT_AZIMUTHS[n] || SEAT_AZIMUTHS[4];
-    const surface = document.querySelector(".table-surface");
+    const baseRing = TABLE.ringByCount[n] || 0.68;
 
-    return azList.map((azimuthDeg, i) => {
+    const specs = azList.map((azimuthDeg, i) => {
+        const sid = order[i];
         const isLocal = i === 0;
+        const scale = seatDensityScale(n);
+        const footprint = boardFootprintWorld(n, sid, isLocal, scale);
         const phi = ((90 + azimuthDeg) * Math.PI) / 180;
+        const maxRing = solveSeatRing(phi, baseRing, footprint).ring;
+        return { sid, isLocal, scale, phi, maxRing };
+    });
+    const sharedRing = Math.min(baseRing, ...specs.map((spec) => spec.maxRing));
 
-        // Percentage ellipse (CSS box aspect creates the visual oval).
-        let left = 50 + TABLE.rim * Math.cos(phi) * 50;
-        let top = 50 + TABLE.rim * Math.sin(phi) * 50;
-
-        // Extra inset so 2x2 boards clear the wood rim.
-        left = 50 + (left - 50) * 0.9;
-        top = 50 + (top - 50) * 0.88;
-
-        left = clampSeatLeft(left);
-        top = clampSeatTop(top, isLocal);
-        if (isLocal) left = 50;
+    return specs.map((spec) => {
+        const { isLocal, scale, phi } = spec;
+        // Keep the near board above the calculated leg attachment at y=3.414.
+        const nearLegY = TABLE.depth / 2 * Math.sqrt(1 - 0.22 ** 2);
+        const nearFootprint = boardFootprintWorld(n, spec.sid, isLocal, scale);
+        const nearRingLimit = (nearLegY - nearFootprint.yMax - 0.58) / (TABLE.depth / 2);
+        const ring = isLocal ? Math.min(sharedRing, nearRingLimit) : sharedRing;
+        const pose = seatPoseAt(phi, ring);
+        const left = 50 + pose.center.x / TABLE.width * 100;
+        const top = 50 + pose.center.y / TABLE.depth * 100;
 
         // Yaw only after final position — matches real W/H pixels.
-        const yaw = yawTowardTableCenter(left, top, surface);
+        const yaw = Math.atan2(-pose.outward.x, pose.outward.y) * 180 / Math.PI;
 
         return {
             left,
             top,
             yaw,
-            scale: densityScale(n, isLocal),
+            scale,
             isLocal,
+            ring,
+            worldX: pose.center.x,
+            worldY: pose.center.y,
+            phi,
         };
     });
 }
@@ -614,12 +809,62 @@ function seatLayout(count) {
 function renderSeats(options = {}) {
     applyTableCameraSettings();
     const order = rotatedOrder();
-    const positions = seatLayout(order.length);
+    const positions = seatLayout(order);
     els.seats.innerHTML = order
         .map((sid, index) => renderSeat(sid, positions[index], options))
         .join("");
     els.seats.dataset.count = String(order.length);
+    renderHands(order, options);
     renderNameplates(order, positions);
+    requestAnimationFrame(() => {
+        layoutNameplates(order);
+        layoutHands(order);
+        layoutTableLegs();
+    });
+}
+
+function renderHands(order, options = {}) {
+    if (!els.hands) return;
+    els.hands.innerHTML = order.map((sid) => {
+        const hideHeld = options.hideAnimTargets && options.action
+            && (options.action.type === "draw" || options.action.type === "take")
+            && options.action.sid === sid;
+        return renderHeldSlot(sid, { hidden: hideHeld });
+    }).join("");
+    layoutHands(order);
+}
+
+function layoutHands(order) {
+    if (!els.hands) return;
+    const stage = document.querySelector(".table-stage");
+    if (!stage) return;
+    const stageRect = stage.getBoundingClientRect();
+    const layerRect = els.hands.getBoundingClientRect();
+    order.forEach((sid) => {
+        const hand = els.hands.querySelector(`[data-held="${CSS.escape(sid)}"]`);
+        const frame = seatWorldFrame(sid);
+        const anchor = heldWorldAnchor(sid);
+        if (!hand || !frame || !anchor) return;
+        const point = projectWorldPoint(anchor.x, anchor.y);
+        if (!point) return;
+        const depthScale = TABLE.cameraLength ** 2
+            / (TABLE.cameraLength ** 2 - TABLE.cameraDistance * anchor.y);
+        let left = stageRect.left - layerRect.left + point.x;
+        let top = stageRect.top - layerRect.top + point.y;
+        hand.style.left = `${left.toFixed(2)}px`;
+        hand.style.top = `${top.toFixed(2)}px`;
+        const handYaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
+        hand.style.setProperty("--hand-yaw", `${handYaw.toFixed(2)}deg`);
+        hand.style.setProperty("--hand-depth-scale", depthScale.toFixed(4));
+        const heldCard = hand.querySelector("[data-held-card]");
+        if (heldCard) {
+            const rect = heldCard.getBoundingClientRect();
+            left += layerRect.left + left - (rect.left + rect.right) / 2;
+            top += layerRect.top + top - (rect.top + rect.bottom) / 2;
+            hand.style.left = `${left.toFixed(2)}px`;
+            hand.style.top = `${top.toFixed(2)}px`;
+        }
+    });
 }
 
 function renderNameplates(order, positions) {
@@ -643,7 +888,7 @@ function renderNameplates(order, positions) {
             !player.connected ? `<span class="badge">OFF</span>` : "",
         ].join("");
         return `
-            <div class="${classes.join(" ")}" data-nameplate="${sid}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%">
+            <div class="${classes.join(" ")}" data-nameplate="${sid}" data-seat-phi="${pos.phi.toFixed(6)}" style="left:${left.toFixed(2)}%;top:${top.toFixed(2)}%">
                 <span class="seat-name">${escapeHtml(player.username)}${isMe ? " (you)" : ""}</span>
                 <div class="seat-badges">${badges}</div>
             </div>
@@ -656,39 +901,143 @@ function renderNameplates(order, positions) {
 /** Snap each nameplate onto the radial line from table center, entirely outside the oval. */
 function layoutNameplates(order) {
     const stage = document.querySelector(".table-stage");
-    const felt = document.querySelector(".felt");
-    if (!stage || !els.nameplates || !felt) return;
+    if (!stage || !els.nameplates) return;
     const stageRect = stage.getBoundingClientRect();
     const plateBox = els.nameplates.getBoundingClientRect();
-    const feltRect = felt.getBoundingClientRect();
     if (stageRect.width < 8 || stageRect.height < 8 || plateBox.width < 8) return;
-
-    const ecx = (feltRect.left + feltRect.right) / 2;
-    const ecy = (feltRect.top + feltRect.bottom) / 2;
-    const erx = feltRect.width / 2;
-    const ery = feltRect.height / 2;
+    const projectedCenter = projectWorldPoint(0, 0);
+    if (!projectedCenter) return;
 
     order.forEach((sid) => {
         const plate = els.nameplates.querySelector(`[data-nameplate="${CSS.escape(sid)}"]`);
-        const seat = document.querySelector(`.seat[data-sid="${CSS.escape(sid)}"]`);
-        if (!plate || !seat) return;
-        const r = seat.getBoundingClientRect();
-        const sx = (r.left + r.right) / 2;
-        const sy = (r.top + r.bottom) / 2;
-        let dx = sx - ecx;
-        let dy = sy - ecy;
+        if (!plate) return;
+        const phi = Number(plate.dataset.seatPhi);
+        const edge = projectWorldPoint(
+            TABLE.width / 2 * Math.cos(phi),
+            TABLE.depth / 2 * Math.sin(phi),
+        );
+        if (!edge) return;
+        let dx = edge.x - projectedCenter.x;
+        let dy = edge.y - projectedCenter.y;
         const len = Math.hypot(dx, dy) || 1;
         dx /= len;
         dy /= len;
-        // Distance from center to ellipse edge along this ray (screen-space).
-        const tEdge = 1 / Math.sqrt((dx / erx) ** 2 + (dy / ery) ** 2);
         const platePad = Math.max(plate.offsetWidth, plate.offsetHeight) * 0.55 + 18;
-        const x = ecx + dx * (tEdge + platePad);
-        const y = ecy + dy * (tEdge + platePad);
+        const desiredX = stageRect.left + edge.x + dx * platePad;
+        const desiredY = stageRect.top + edge.y + dy * platePad;
+        const halfWidth = plate.offsetWidth / 2;
+        const halfHeight = plate.offsetHeight / 2;
+        const x = Math.max(
+            stageRect.left + halfWidth + 6,
+            Math.min(stageRect.right - halfWidth - 6, desiredX),
+        );
+        const y = Math.max(
+            stageRect.top + halfHeight + 6,
+            Math.min(stageRect.bottom - halfHeight - 6, desiredY),
+        );
         plate.style.left = `${(((x - plateBox.left) / plateBox.width) * 100).toFixed(2)}%`;
         plate.style.top = `${(((y - plateBox.top) / plateBox.height) * 100).toFixed(2)}%`;
     });
 }
+
+/** Legs are screen-space furniture attached to the projected lower ellipse. */
+function layoutTableLegs() {
+    const stage = document.querySelector(".table-stage");
+    const table3d = document.querySelector(".table-3d");
+    const legs = document.querySelector(".table-legs");
+    if (!stage || !table3d || !legs) return;
+    const stageRect = stage.getBoundingClientRect();
+    const layerRect = legs.getBoundingClientRect();
+    const scale = Number(table3d.dataset.worldScale);
+    const centerY = parseFloat(getComputedStyle(table3d).getPropertyValue("--table-center-y"));
+    if (!scale || !centerY) return;
+
+    const focal = scale * TABLE.cameraLength;
+    const sinPitch = Math.sin(TABLE.pitch);
+    const cosPitch = Math.cos(TABLE.pitch);
+    const normalizedX = 0.22;
+    const worldX = TABLE.width / 2 * normalizedX;
+    const worldY = TABLE.depth / 2 * Math.sqrt(1 - normalizedX ** 2);
+    const denominator = focal - scale * worldY * sinPitch;
+    const projectX = (x) => stageRect.width / 2 + focal * scale * x / denominator;
+    const attachY = centerY + focal * scale * worldY * cosPitch / denominator - 6;
+    const projectedWidth = focal * scale * TABLE.width / focal;
+    const compact = stageRect.width < 700;
+    const width = Math.max(compact ? 24 : 58, Math.min(108, projectedWidth * 0.075));
+    const availableHeight = Math.max(64, stageRect.height - attachY - 8);
+    const height = Math.min(Math.max(compact ? 46 : 112, scale * 1.55), availableHeight);
+
+    const stageOffsetX = stageRect.left - layerRect.left;
+    const stageOffsetY = stageRect.top - layerRect.top;
+    legs.style.setProperty("--leg-left-x", `${(stageOffsetX + projectX(-worldX)).toFixed(2)}px`);
+    legs.style.setProperty("--leg-right-x", `${(stageOffsetX + projectX(worldX)).toFixed(2)}px`);
+    legs.style.setProperty("--leg-top", `${(stageOffsetY + attachY).toFixed(2)}px`);
+    legs.style.setProperty("--leg-width", `${width.toFixed(2)}px`);
+    legs.style.setProperty("--leg-height", `${height.toFixed(2)}px`);
+}
+
+function rectsOverlap(a, b, padding = 0) {
+    return a.left < b.right - padding && a.right > b.left + padding
+        && a.top < b.bottom - padding && a.bottom > b.top + padding;
+}
+
+/** Render-time geometry report used by screenshot QA and regression checks. */
+window.getTableProjectionDiagnostics = function getTableProjectionDiagnostics() {
+    const table3d = document.querySelector(".table-3d");
+    const seats = [...document.querySelectorAll(".seat")];
+    const piles = document.querySelector(".table-center-piles")?.getBoundingClientRect();
+    const overlaps = [];
+    seats.forEach((seat, i) => {
+        const a = seat.getBoundingClientRect();
+        if (piles && rectsOverlap(a, piles, 4)) overlaps.push(`${seat.dataset.sid}:piles`);
+        seats.slice(i + 1).forEach((other) => {
+            if (rectsOverlap(a, other.getBoundingClientRect(), 4)) {
+                overlaps.push(`${seat.dataset.sid}:${other.dataset.sid}`);
+            }
+        });
+    });
+    const facingDots = seats.map((seat) => {
+        const x = parseFloat(seat.style.getPropertyValue("--seat-world-x"));
+        const y = parseFloat(seat.style.getPropertyValue("--seat-world-y"));
+        const yaw = parseFloat(seat.style.getPropertyValue("--seat-yaw")) * Math.PI / 180;
+        const top = { x: Math.sin(yaw), y: -Math.cos(yaw) };
+        const toCenterLength = Math.hypot(x, y) || 1;
+        return Number((top.x * (-x / toCenterLength) + top.y * (-y / toCenterLength)).toFixed(5));
+    });
+    const cardWidths = seats.map((seat) => ({
+        x: parseFloat(seat.style.getPropertyValue("--seat-world-x")),
+        y: parseFloat(seat.style.getPropertyValue("--seat-world-y")),
+        width: seat.querySelector(".board-card")?.getBoundingClientRect().width || 0,
+    })).sort((a, b) => a.y - b.y);
+    const axialCards = cardWidths.filter((card) => Math.abs(card.x) < 0.05);
+    const measuredNearFarRatio = axialCards.length === 2 && axialCards[0].width
+        ? axialCards[1].width / axialCards[0].width
+        : null;
+    const expectedAxialSeatRatio = axialCards.length === 2
+        ? (TABLE.cameraLength ** 2 - TABLE.cameraDistance * axialCards[0].y)
+            / (TABLE.cameraLength ** 2 - TABLE.cameraDistance * axialCards[1].y)
+        : null;
+    return {
+        world: { width: TABLE.width, depth: TABLE.depth, card: [TABLE.cardWidth, TABLE.cardHeight] },
+        camera: {
+            distance: TABLE.cameraDistance,
+            height: TABLE.cameraHeight,
+            pitchDegrees: Number((TABLE.pitch * 180 / Math.PI).toFixed(4)),
+            focalPixels: parseFloat(getComputedStyle(table3d).getPropertyValue("--camera-focal")),
+        },
+        scalePixelsPerUnit: Number(table3d?.dataset.worldScale || 0),
+        expectedNearFarRatio: Number(table3d?.dataset.projectedNearFarRatio || 0),
+        expectedAxialSeatRatio: expectedAxialSeatRatio && Number(expectedAxialSeatRatio.toFixed(4)),
+        measuredNearFarRatio: measuredNearFarRatio && Number(measuredNearFarRatio.toFixed(4)),
+        seatDepthScales: cardWidths.map((card) => Number((
+            TABLE.cameraLength ** 2
+            / (TABLE.cameraLength ** 2 - TABLE.cameraDistance * card.y)
+        ).toFixed(4))),
+        facingDots,
+        overlaps,
+        rings: seats.map((seat) => Number(seat.style.getPropertyValue("--seat-ring"))),
+    };
+};
 
 function renderSeat(sid, position, options = {}) {
     const player = state.players[sid];
@@ -698,37 +1047,42 @@ function renderSeat(sid, position, options = {}) {
     if (player.protected) classes.push("protected");
     if (sid === state.current_turn_sid) classes.push("current-turn");
 
-    const hideHeld = options.hideAnimTargets && options.action
-        && (options.action.type === "draw" || options.action.type === "take")
-        && options.action.sid === sid;
-
     const hideSlot = options.hideAnimTargets && options.action
         && options.action.type === "swap"
         && options.action.sid === sid
         ? options.action.index
         : -1;
+    const hiddenSwitchSlots = options.hideAnimTargets && options.action?.type === "switch"
+        ? [options.action.a, options.action.b]
+            .filter((item) => item?.owner_sid === sid)
+            .map((item) => item.index)
+        : [];
 
-    const held = renderHeldSlot(sid, { hidden: hideHeld });
     const cols = player.board.length <= 4 ? 2 : Math.min(3, Math.ceil(player.board.length / 2));
     const cards = player.board
-        .map((slot, index) => renderBoardCard(sid, index, slot, { hidden: index === hideSlot }))
+        .map((slot, index) => renderBoardCard(sid, index, slot, {
+            hidden: index === hideSlot || hiddenSwitchSlots.includes(index),
+        }))
         .join("");
 
     const style = [
+        `--seat-width:var(--grid-width-${cols})`,
         `--seat-left:${position.left.toFixed(2)}%`,
         `--seat-top:${position.top.toFixed(2)}%`,
         `--seat-yaw:${position.yaw.toFixed(1)}deg`,
         `--seat-scale:${position.scale.toFixed(3)}`,
-        // Local-space offset → toward viewer after rotateZ(yaw)
-        `--shadow-x:${(Math.sin((position.yaw * Math.PI) / 180) * 7).toFixed(1)}px`,
-        `--shadow-y:${(Math.cos((position.yaw * Math.PI) / 180) * 8).toFixed(1)}px`,
+        `--seat-ring:${position.ring.toFixed(4)}`,
+        `--seat-world-x:${position.worldX.toFixed(4)}`,
+        `--seat-world-y:${position.worldY.toFixed(4)}`,
+        `--shadow-x:${(Math.sin((position.yaw * Math.PI) / 180) * 3).toFixed(1)}px`,
+        `--shadow-y:${(Math.cos((position.yaw * Math.PI) / 180) * 3).toFixed(1)}px`,
+        `z-index:${Math.round(position.top * 10)}`,
     ].join(";");
 
     return `
         <section class="${classes.join(" ")}" style="${style}" data-sid="${sid}">
             <div class="seat-scale">
                 <div class="seat-board">
-                    ${held}
                     <div class="card-grid cols-${cols}" data-grid="${sid}">${cards}</div>
                 </div>
             </div>
@@ -738,6 +1092,7 @@ function renderSeat(sid, position, options = {}) {
 
 function renderHeldSlot(sid, options = {}) {
     const isMe = sid === mySid;
+    const isBot = Boolean(state.players[sid]?.is_bot);
     const holding = playerIsHolding(sid);
     const peek = state.held_peek?.sid === sid ? state.held_peek : null;
 
@@ -771,7 +1126,7 @@ function renderHeldSlot(sid, options = {}) {
     const hiddenClass = options.hidden ? " anim-hidden" : "";
     const trayClass = isMe ? " hand-tray" : "";
     return `
-        <div class="held-slot filled${trayClass}${hiddenClass}" data-held="${sid}">
+        <div class="held-slot filled${trayClass}${isBot ? " bot-hand" : ""}${hiddenClass}" data-held="${sid}">
             ${isMe ? `<span class="hand-label">hand</span>` : ""}
             ${inner}
             ${actions}
@@ -802,11 +1157,16 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     const burnt = isBurntSlot(ownerSid, index);
     const highlight = shouldHighlightSlot(ownerSid, index);
     const opening = canOpeningPeek(ownerSid, index, slot);
+    const looked = isRecentlyMarked("looked", ownerSid, index)
+        || isKingInspectionCard(ownerSid, index);
+    const switched = isRecentlyMarked("switched", ownerSid, index);
     const classes = ["board-card", slot.faceUp ? "face-up" : "face-down"];
     if (slot.faceUp && slot.card) classes.push(colorClass(slot.card));
     if (selected) classes.push("selected");
     if (burnt) classes.push("burnt");
     if (highlight) classes.push("swap-mark");
+    if (looked) classes.push("looked-mark");
+    if (switched) classes.push("switched-mark");
     if (opening) classes.push("opening-peek");
     if (options.hidden) classes.push("anim-hidden");
     if (isClickable(ownerSid, index, slot) || opening) classes.push("selectable");
@@ -1112,8 +1472,76 @@ function readYaw(el) {
     return Number.isFinite(n) ? n : 0;
 }
 
+function isRecentlyMarked(type, ownerSid, index) {
+    return recentCardMarks[type].some((item) => item.owner_sid === ownerSid && item.index === index);
+}
+
+function isKingInspectionCard(ownerSid, index) {
+    const ability = state.pending_ability;
+    if (!ability || ability.type !== "switch_peek" || ability.stage !== "deciding") return false;
+    return (ability.selected || []).some((item) => item.owner_sid === ownerSid && item.index === index);
+}
+
+function seatWorldFrame(sid) {
+    const seat = document.querySelector(`.seat[data-sid="${CSS.escape(sid)}"]`);
+    if (!seat) return null;
+    const yaw = readYaw(seat);
+    const radians = yaw * Math.PI / 180;
+    return {
+        seat,
+        x: parseFloat(seat.style.getPropertyValue("--seat-world-x")),
+        y: parseFloat(seat.style.getPropertyValue("--seat-world-y")),
+        yaw,
+        scale: parseFloat(seat.style.getPropertyValue("--seat-scale")) || 1,
+        tangent: { x: Math.cos(radians), y: Math.sin(radians) },
+        outward: { x: -Math.sin(radians), y: Math.cos(radians) },
+    };
+}
+
+function worldFromSeatLocal(frame, localX, localY, tilt = 0) {
+    if (!frame) return null;
+    return {
+        x: frame.x + frame.tangent.x * localX + frame.outward.x * localY,
+        y: frame.y + frame.tangent.y * localX + frame.outward.y * localY,
+        yaw: frame.yaw,
+        tilt,
+    };
+}
+
+function uprightHandYaw(yaw) {
+    let normalized = ((yaw + 180) % 360 + 360) % 360 - 180;
+    if (normalized > 90) normalized -= 180;
+    if (normalized < -90) normalized += 180;
+    return normalized;
+}
+
+function boardWorldAnchor(sid, index) {
+    const frame = seatWorldFrame(sid);
+    if (!frame) return null;
+    const boardLength = state?.players?.[sid]?.board?.length || 4;
+    const cols = gridColsForBoard(boardLength);
+    const rows = Math.max(1, Math.ceil(boardLength / cols));
+    const col = index % cols;
+    const row = Math.floor(index / cols);
+    const localX = (col - (cols - 1) / 2) * (TABLE.cardWidth + TABLE.cardGap) * frame.scale;
+    const localY = (row - (rows - 1) / 2) * (TABLE.cardHeight + TABLE.cardGap) * frame.scale;
+    return worldFromSeatLocal(frame, localX, localY);
+}
+
+function heldWorldAnchor(sid) {
+    const frame = seatWorldFrame(sid);
+    if (!frame) return null;
+    const boardLength = state?.players?.[sid]?.board?.length || 4;
+    const cols = gridColsForBoard(boardLength);
+    const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
+    const localX = -(boardWidth / 2 + 0.14 + TABLE.cardWidth / 2) * frame.scale;
+    const anchor = worldFromSeatLocal(frame, localX, 0, -TABLE.pitch * 180 / Math.PI);
+    anchor.yaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
+    return anchor;
+}
+
 function captureAnchors() {
-    const rect = (el, yawEl = null) => {
+    const rect = (el, yawEl = null, world = null) => {
         if (!el) return null;
         const r = el.getBoundingClientRect();
         if (r.width === 0 && r.height === 0) return null;
@@ -1125,11 +1553,12 @@ function captureAnchors() {
             w: sized.w,
             h: sized.h,
             yaw,
+            world,
         };
     };
     const out = {
-        draw: rect(els.drawBtn),
-        discard: rect(els.discardBtn),
+        draw: rect(els.drawBtn, null, { x: -0.46, y: 0, yaw: 0, tilt: 0 }),
+        discard: rect(els.discardBtn, null, { x: 0.46, y: 0, yaw: 0, tilt: 0 }),
         held: {},
         boards: {},
         seats: {},
@@ -1140,17 +1569,25 @@ function captureAnchors() {
         out.held[sid] = rect(
             document.querySelector(`[data-held-card="${CSS.escape(sid)}"]`)
             || document.querySelector(`[data-held="${CSS.escape(sid)}"]`),
-            seat
+            seat,
+            heldWorldAnchor(sid),
         );
         out.boards[sid] = {};
         const len = state.players[sid]?.board?.length || 4;
         for (let i = 0; i < len; i++) {
             out.boards[sid][i] = rect(
                 document.querySelector(`.board-card[data-owner="${CSS.escape(sid)}"][data-index="${i}"]`),
-                seat
+                seat,
+                boardWorldAnchor(sid, i),
             );
         }
-        out.seats[sid] = rect(seat, seat);
+        const frame = seatWorldFrame(sid);
+        out.seats[sid] = rect(seat, seat, frame && {
+            x: frame.x,
+            y: frame.y,
+            yaw: frame.yaw,
+            tilt: 0,
+        });
     }
     return out;
 }
@@ -1159,7 +1596,52 @@ function captureFullAnchors() {
     return captureAnchors();
 }
 
+function flyCardOnPlane({ from, to, html, className = "", duration = ANIM_MS }) {
+    return new Promise((resolve) => {
+        const surface = document.querySelector(".table-surface");
+        const table3d = document.querySelector(".table-3d");
+        if (!surface || !table3d || !from?.world || !to?.world) {
+            resolve();
+            return;
+        }
+        const start = from.world;
+        const end = to.world;
+        const scale = Number(table3d.dataset.worldScale) || 80;
+        const el = document.createElement("div");
+        el.className = `fly-card plane-flight ${className}`.trim();
+        el.innerHTML = html;
+        surface.appendChild(el);
+
+        const setPose = (x, y, yaw, tilt, lift) => {
+            el.style.transform = `translate3d(${x * scale}px, ${y * scale}px, ${lift}px) translate(-50%, -50%) rotateZ(${yaw}deg) rotateX(${tilt}deg)`;
+        };
+        setPose(start.x, start.y, start.yaw || 0, start.tilt || 0, 2);
+        const t0 = performance.now();
+
+        function frame(now) {
+            const t = Math.min(1, (now - t0) / duration);
+            const e = easeInOutCubic(t);
+            const x = start.x + (end.x - start.x) * e;
+            const y = start.y + (end.y - start.y) * e;
+            const yaw = (start.yaw || 0) + shortestDeg((end.yaw || 0) - (start.yaw || 0)) * e;
+            const tilt = (start.tilt || 0) + ((end.tilt || 0) - (start.tilt || 0)) * e;
+            const lift = 2 + Math.sin(Math.PI * e) * scale * 0.34;
+            setPose(x, y, yaw, tilt, lift);
+            if (t < 1) {
+                requestAnimationFrame(frame);
+            } else {
+                el.remove();
+                resolve();
+            }
+        }
+        requestAnimationFrame(frame);
+    });
+}
+
 function flyCard({ from, to, html, className = "", duration = ANIM_MS }) {
+    if (from?.world && to?.world) {
+        return flyCardOnPlane({ from, to, html, className, duration });
+    }
     return new Promise((resolve) => {
         if (!els.flyLayer || !from || !to) {
             resolve();
@@ -1228,6 +1710,7 @@ function faceUpHtml(card) {
 
 function destHeld(sid, afterAnchors) {
     const held = afterAnchors.held[sid];
+    if (held?.world) return held;
     // Prefer a real held-card rect; ignore tiny/warped AABBs from hidden trays.
     if (held && held.w >= 40 && held.h >= 50) return held;
 
@@ -1247,6 +1730,7 @@ function destHeld(sid, afterAnchors) {
 
 function destBoard(sid, index, afterAnchors) {
     const slot = afterAnchors.boards[sid] && afterAnchors.boards[sid][index];
+    if (slot?.world) return slot;
     if (slot && slot.w >= 30 && slot.h >= 40) return slot;
     return destHeld(sid, afterAnchors);
 }
@@ -1265,13 +1749,14 @@ async function playActionAnimation(action, beforeAnchors) {
             const html = action.sid === mySid && state.pending_draw?.card
                 ? faceUpHtml(state.pending_draw.card)
                 : faceDownHtml();
-            await flyCard({ from: srcDraw, to, html });
+            await flyCard({ from: srcDraw, to, html, duration: PICKUP_ANIM_MS });
         } else if (action.type === "take") {
             const to = destHeld(action.sid, after);
             await flyCard({
                 from: srcDiscard,
                 to,
                 html: action.sid === mySid && action.card ? faceUpHtml(action.card) : faceDownHtml(),
+                duration: PICKUP_ANIM_MS,
             });
         } else if (action.type === "swap") {
             const heldRect = (before.held && before.held[action.sid]) || after.held[action.sid] || after.seats[action.sid];
@@ -1285,11 +1770,13 @@ async function playActionAnimation(action, beforeAnchors) {
                     from: heldRect || srcDraw,
                     to: slotTo,
                     html: faceDownHtml(),
+                    duration: SWITCH_ANIM_MS,
                 }),
                 flyCard({
                     from: slotFrom || slotTo,
                     to: discardTo,
                     html: faceUpHtml(action.outgoing),
+                    duration: CENTER_ANIM_MS,
                 }),
             ]);
         } else if (action.type === "play") {
@@ -1298,6 +1785,7 @@ async function playActionAnimation(action, beforeAnchors) {
                 from,
                 to: after.discard || srcDiscard,
                 html: faceUpHtml(action.card),
+                duration: CENTER_ANIM_MS,
             });
         } else if (action.type === "burn") {
             const from = (before.boards && before.boards[action.owner_sid] && before.boards[action.owner_sid][action.index])
@@ -1306,6 +1794,7 @@ async function playActionAnimation(action, beforeAnchors) {
                 from,
                 to: after.discard || srcDiscard,
                 html: faceUpHtml(action.card),
+                duration: CENTER_ANIM_MS,
             });
         } else if (action.type === "burn_fail") {
             // Missed burn stays face-up on the board so everyone can see it.
@@ -1317,18 +1806,18 @@ async function playActionAnimation(action, beforeAnchors) {
                 const fromA = destBoard(a.owner_sid, a.index, after);
                 const fromB = destBoard(b.owner_sid, b.index, after);
                 await Promise.all([
-                    flyCard({ from: fromA, to: fromB, html: faceDownHtml() }),
-                    flyCard({ from: fromB, to: fromA, html: faceDownHtml() }),
+                    flyCard({ from: fromA, to: fromB, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
+                    flyCard({ from: fromB, to: fromA, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
                 ]);
             }
         } else if (action.type === "peek") {
             const from = destBoard(action.owner_sid, action.index, after);
             const to = destHeld(action.sid, after);
-            await flyCard({ from, to, html: faceDownHtml() });
+            await flyCard({ from, to, html: faceDownHtml(), duration: PICKUP_ANIM_MS });
         } else if (action.type === "put_back") {
             const from = destHeld(action.sid, after);
             const to = destBoard(action.owner_sid, action.index, after);
-            await flyCard({ from, to, html: faceDownHtml() });
+            await flyCard({ from, to, html: faceDownHtml(), duration: SWITCH_ANIM_MS });
         } else {
             await wait(ANIM_MS * 0.35);
         }

@@ -1,321 +1,244 @@
-================================================================================
-SHMAMALE — COMPLETE RULES & IMPLEMENTATION REFERENCE
-================================================================================
-For Codex / AI agents working on this codebase.
-
-This file describes the game AS IMPLEMENTED in game.py and multiplayer.py.
-If behavior in code and this file disagree, treat the Python as source of truth
-and update this file to match.
+SHMAMALE RULES
+==============
 
-Stack: Flask + Flask-SocketIO; client JS in static/js/; CSS in static/css/.
-Entry: python app.py  →  http://127.0.0.1:5000
+1. Goal
+-------
 
+Shmamale is a low-score card game played over multiple rounds.
 
---------------------------------------------------------------------------------
-1. GOAL & WIN / LOSS CONDITION
---------------------------------------------------------------------------------
-
-Shmamale is a LOW-SCORE card game played over multiple rounds.
-
-- Each player has a running SCORE (starts at 0).
-- After each round, round points are ADDED to every player's score.
-- Default TARGET SCORE is 50 (host-configurable in settings).
-- The FIRST player(s) whose score reaches or exceeds the target LOSE.
-- When one or more players are over target, game status becomes "game_over".
-  Among those over target, the losers are whoever has the HIGHEST score.
-  (So the loser is "first to the target," with ties broken by being highest.)
-
-Homepage slogan: "First to 50 loses."
-
-
---------------------------------------------------------------------------------
-2. COMPONENTS
---------------------------------------------------------------------------------
-
-2.1 Deck
-- Standard 52-card deck ranks: A, 2–10, J, Q, K across clubs, spades, hearts,
-  diamonds.
-- Plus JOKERS (default 2 per deck).
-- Host may set deck_count (how many full decks shuffled together) and jokers
-  count per deck.
-- When the draw pile empties, all discard cards EXCEPT the current top discard
-  are reshuffled into a new draw pile (top discard stays).
-
-2.2 Board
-- Each player starts each round with a 2×2 board = 4 hidden slots.
-  Slot indices: 0, 1 = top row; 2, 3 = bottom row (BOTTOM_ROW = {2, 3}).
-- Boards can GROW past 4 slots if a player receives a failed-burn penalty and
-  has no empty slot (a new slot is appended).
-
-2.3 Piles (table center)
-- Draw pile (face-down).
-- Discard pile (top card face-up; everyone can see it).
-
-2.4 Players
-- Multiplayer: 2+ humans in a room (host starts when all ready).
-- Bot mode: 1 human + 1–5 bots (easy / medium / hard).
-
-
---------------------------------------------------------------------------------
-3. CARD VALUES (point values toward board / round score)
---------------------------------------------------------------------------------
-
-Rank / card                         Value
------------------------------------------
-Joker                               -2
-Red King (hearts or diamonds)       -1
-Ace                                 1
-2–10                                face value (2–10)
-Jack                                11
-Queen                               12
-Black King (clubs or spades)        13
-
-Lower board total is better for the round.
-
-
---------------------------------------------------------------------------------
-4. SPECIAL / ABILITY CARDS
---------------------------------------------------------------------------------
-
-Abilities apply ONLY when a card is PLAYED from a DECK DRAW onto the discard
-(not when swapping into your board). Abilities can be used or skipped.
-
-Burn matching uses burn_key = rank (or "JOKER"). Suit does not matter for burns.
-Example: any 7 matches any other 7; any Joker matches any other Joker.
-
-Ability map (game.card_ability):
-
-  Rank          Ability key        Effect
-  ------------- ------------------ --------------------------------------------
-  7 or 8        peek_own           Peek at ONE of your own board cards.
-  9 or 10       peek_other         Peek at ONE opponent board card.
-  J or Q        switch_unseen      Choose ANY two live board cards (yours and/or
-                                   others) and swap them WITHOUT looking.
-  Black King    switch_peek        Choose two live board cards, LOOK at both,
-                                   then choose whether to swap them or leave
-                                   them. (Red Kings have no ability.)
-  Other cards   none               No special when discarded from draw.
-
-Peek hold: while peeking, the card is temporarily lifted (held_peek). The
-viewer may put it back, or if it matches the current discard top and is
-eligible, burn it from the peek (see Burns).
-
-Protection: a player who has "called" is protected from SWITCH abilities
-targeting their cards (other players cannot switch those cards). The caller
-can still switch their own cards.
-
-
---------------------------------------------------------------------------------
-5. ROUND SETUP
---------------------------------------------------------------------------------
-
-1. Shuffle deck(s) + jokers; deal 4 face-down cards to each player.
-2. Draw pile holds the rest; discard starts empty.
-3. Clear call / protection / pending actions / burn state.
-4. Round number increments.
-5. Turn order continues; next_start_sid (from previous round) may set who goes
-   first this round.
-
-Opening peek (before a player's first ACTION of the round on their turn clock):
-- Until a player takes their first turn action, they may click to reveal their
-  TWO BOTTOM cards only (indices 2 and 3), privately.
-- Opening peek ends when that player starts their first turn action
-  (draw / take discard / call).
-- The player whose turn it is at round start is intentionally NOT marked
-  "turn started" yet, so they still get the opening peek.
-
-
---------------------------------------------------------------------------------
-6. TURN STRUCTURE
---------------------------------------------------------------------------------
-
-Phases (game["phase"]):
-  lobby → (start) choose → drawn → (optional) ability → … → round_over / game_over
-
-On your turn, while phase == "choose", you must pick ONE of:
-  A) CALL the round (see Calling)
-  B) TAKE the top discard (if any)
-  C) DRAW from the deck
-
-You cannot act while a burn-give is pending that must be finished first.
-
-6.1 Take discard (source = "discard")
-- Remove top discard into your hand (pending_draw).
-- Burn tracking for the OLD top is reset (new discard top / epoch).
-- You MUST swap it onto one of your live board slots.
-- The replaced board card goes onto the discard.
-- The card you just placed from discard cannot be burned against this same
-  discard epoch (burn_blocker on that slot+card id).
-- No ability triggers from taking discard.
-- Turn then advances.
-
-6.2 Draw from deck (source = "draw")
-- Take top of draw into hand (only you see it).
-- Then either:
-  (i) SWAP it with one of your board cards (replaced card → discard), OR
-  (ii) PLAY it onto the discard (leave your board unchanged).
-- If you PLAY a card that has an ability, phase becomes "ability" and you may
-  use or skip the special. After ability resolve/skip, turn advances.
-- If you PLAY a card with no ability, turn advances immediately.
-- If you SWAP, turn advances (no ability from the card you kept in hand —
-  abilities only fire when the drawn card is played to discard).
-
-Turns auto-advance after swap/play/ability finish. Call also advances the turn.
-
-
---------------------------------------------------------------------------------
-7. BURNING (matching discards) — ANYTIME (with limits)
---------------------------------------------------------------------------------
-
-Burns happen OUTSIDE the normal draw/swap flow. Any eligible player may attempt
-a burn when:
-- Round status is "playing"
-- There is a discard top
-- No unfinished pending_burn give-flow
-- The burner is not currently holding a pending_draw of their own
-- (Dedicated burn-from-peek exists while holding a peeked card)
-
-How to burn:
-1. Select a LIVE board card (yours or an opponent's).
-2. That card is revealed.
-3. Match = same burn_key / rank as current discard top.
-
-SUCCESS — own card:
-- Card is removed from the board (slot becomes empty).
-- Slot is marked burnt for this discard epoch so it can't be double-used oddly.
-
-SUCCESS — opponent's card:
-- You must HAVE at least one of your own live cards to give them.
-- Opponent's burned card is marked; you enter pending_burn ("give") flow:
-  choose ONE of your cards to GIVE into that opponent's burned slot (face-down).
-  Your given slot becomes empty.
-- Board card count can shrink via burns; empty slots stay unless penalty expands.
+- Each player has a running score that starts at 0.
+- After each round, each player's round points are added to their score.
+- The default target score is 50.
+- The first player or players to reach or pass the target score lose.
+- If multiple players are over the target, the loser is the over-target player
+  with the highest score.
 
-FAILURE (wrong rank, or already-burnt slot rule in some paths):
-- Target card stays revealed (face-up knowledge).
-- Burner receives a PENALTY card from the draw pile into the first empty board
-  slot, OR if the board is full, the board expands with a new slot.
-- This is a pure penalty; it does not replace an existing card.
-
-Cannot burn:
-- A card you JUST placed from taking the discard (burn_blocker until new discard
-  top epoch).
-- While you personally are holding a drawn/taken card (pending_draw).
-
-Burning does NOT by itself end your turn (except when burn-from-peek completes
-an ability and advances). Successful own burns and failed burns leave the
-current turn player unchanged.
-
-Discard epoch: whenever a new card lands on discard in a way that resets burns,
-burnt_slots / burn_blockers clear so the new top can be burned against fresh.
-
-
---------------------------------------------------------------------------------
-8. CALLING THE ROUND
---------------------------------------------------------------------------------
-
-On your turn in phase "choose" (BEFORE drawing/taking), you may CALL.
-
-Effects:
-- You are marked called + protected (immune to opponents' switch abilities).
-- If you are the FIRST caller this round:
-  - first_caller_sid = you
-  - Every OTHER player gets exactly one final turn
-    (final_turns_remaining = all other sids).
-  - After those final turns are done, the round ends and scores.
-- If someone already called and you call later on your final turn:
-  - You still get protection; you do not re-open another set of finals.
-
-After calling, your turn advances (you do not also draw that turn).
-
-
---------------------------------------------------------------------------------
-9. END OF ROUND SCORING
---------------------------------------------------------------------------------
-
-When finals are exhausted (or equivalent finish_round path):
-
-1. RAW hand score = sum of card values still on each player's board
-   (empty slots contribute 0).
-
-2. NORMALIZATION: if any hand total is negative, add abs(min_hand) to EVERY
-   player's hand score so nobody goes negative for this round's contribution.
-   (Stored as negative_bump.)
-
-3. CALLER PENALTY: if the first caller has the STRICTLY WORST (highest) raw hand
-   among all players, their NORMALIZED round score is DOUBLED.
-   (Calling when you are not actually low can punish you hard.)
-
-4. Add each player's round_scores into their cumulative score.
-
-5. Choose who starts next round:
-   - Prefer a player with the lowest RAW hand.
-   - If the first caller is tied for lowest with others, prefer a non-caller
-     among the lows (caller shouldn't always keep going first after a good call).
-
-6. If anyone's cumulative score >= target_score → game_over (losers = highest
-   among those over target). Else status = round_over; host starts next round.
-
-
---------------------------------------------------------------------------------
-10. MULTIROUND / SETTINGS
---------------------------------------------------------------------------------
-
-Default settings (default_settings):
-  target_score: 50
-  deck_count: 1
-  jokers: 2
-  bot_count: 0
-  bot_difficulty: "medium"
-
-Host can update settings in lobby before start.
-Minimum 2 players; all must be ready (bots are auto-ready).
-
-
---------------------------------------------------------------------------------
-11. WHAT CLIENTS MUST NOT CONFUSE WITH RULES
---------------------------------------------------------------------------------
-
-UI/layout (oval table, seat yaw, CSS perspective, shadows, etc.) is NOT part of
-the rules. Do not change scoring, burn matching, abilities, call logic, or
-socket event contracts unless explicitly asked.
-
-Key server modules:
-  game.py         — card data, values, abilities, board helpers, scoring board sum
-  multiplayer.py  — rooms, turns, burns, abilities, bots, SocketIO handlers
-  app.py          — HTTP routes (homepage, create/join room, bot game)
-
-Bot AI (easy/medium/hard) uses thresholds for when to call, take discard, use
-abilities, and attempt burns. Bots are gameplay aids; their heuristics are not
-"official" house rules for humans.
-
-
---------------------------------------------------------------------------------
-12. QUICK REFERENCE — PLAYER ACTIONS
---------------------------------------------------------------------------------
-
-Anytime (if eligible): burn a board card matching discard top.
-On your choose phase: draw | take discard | call.
-After draw: swap onto board OR play to discard (+ optional ability).
-After take discard: must swap onto board.
-After first caller: each other player gets one last turn, then score.
-
-Card knowledge:
-- Own opening: bottom two privately at start.
-- Abilities: temporary peeks.
-- Burns: reveal the attempted card (success removes or give-flow; fail stays up).
-- Failed burns can expand boards with extra face-down penalties.
-
-
---------------------------------------------------------------------------------
-13. DESIGN INTENT (HOUSE STYLE)
---------------------------------------------------------------------------------
-
-Shmamale blends Golf / Cabo-style low boards with interrupt-style "burn the
-discard match" and ability cards on high ranks. Tension comes from:
-- Calling early while low, vs risking the double if you are actually high.
-- Burning opponents to dump high cards onto them (give exchange).
-- Using peeks/switches to set up burns without flipping your whole board.
-
-Keep these incentives intact when changing code.
-================================================================================
+
+2. Cards And Values
+-------------------
+
+The deck uses standard playing cards plus jokers.
+
+Card values:
+
+- Joker: -2
+- Red King: -1
+- Ace: 1
+- 2 through 10: face value
+- Jack: 11
+- Queen: 12
+- Black King: 13
+
+Lower totals are better.
+
+
+3. Player Boards
+----------------
+
+- Each player starts each round with four face-down cards in a 2 by 2 board.
+- Slot 1 and slot 2 are the top row.
+- Slot 3 and slot 4 are the bottom row.
+- Empty slots count as 0 points.
+- Penalty cards can add extra slots if a player has no empty slot available.
+
+
+4. Round Setup
+--------------
+
+At the start of each round:
+
+1. Shuffle the deck.
+2. Deal four face-down cards to each player.
+3. Place the remaining cards face down as the draw pile.
+4. Start with an empty discard pile.
+5. Clear calls, protection, burns, pending actions, and temporary peeks.
+
+Opening peek:
+
+- Before taking their first turn action of the round, a player may privately
+  peek at their two bottom cards.
+- The opening peek only applies to the bottom row.
+- Once that player draws, takes the discard, or calls, their opening peek ends.
+
+
+5. Turn Choices
+---------------
+
+On your turn, if no burn-give action is waiting, choose one action:
+
+- Call
+- Take the top discard
+- Draw from the deck
+
+
+6. Taking The Discard
+---------------------
+
+When you take the top discard:
+
+1. Put that card into your hand.
+2. Choose one of your live board cards.
+3. Put the taken discard into that board slot.
+4. Move the replaced board card to the discard pile.
+
+Taking the discard does not trigger a special ability.
+
+The card you just placed from the discard cannot be burned against that same
+discard moment.
+
+
+7. Drawing From The Deck
+------------------------
+
+When you draw from the deck, you may either swap or play.
+
+Swap:
+
+1. Put the drawn card into one of your live board slots.
+2. Move the replaced board card to the discard pile.
+3. End your turn.
+
+Play:
+
+1. Put the drawn card directly on the discard pile.
+2. If it has a special ability, you may use or skip that ability.
+3. End your turn after the ability is resolved or skipped.
+
+Special abilities only trigger when a card drawn from the deck is played to the
+discard pile. They do not trigger when a card is swapped into your board.
+
+
+8. Special Abilities
+--------------------
+
+7 or 8:
+
+- Peek at one of your own board cards.
+
+9 or 10:
+
+- Peek at one opponent's board card.
+
+Jack or Queen:
+
+- Choose any two live board cards and swap them without looking.
+- The cards may belong to you, opponents, or one of each.
+
+Black King:
+
+- Choose two live board cards.
+- Look at both.
+- Decide whether to swap them or leave them where they are.
+
+Red Kings have no special ability.
+
+If a player has called, their cards are protected from opponents' switch
+abilities. The caller may still switch their own cards.
+
+
+9. Burning
+----------
+
+Burning is an anytime action that can happen outside the normal turn flow.
+
+You may attempt a burn when:
+
+- The round is still playing.
+- There is a top discard card.
+- No burn-give action is waiting.
+- You are not currently holding a drawn or taken card.
+
+To burn:
+
+1. Choose a live board card belonging to any player.
+2. Reveal that card.
+3. Compare its rank to the top discard card.
+
+Suits do not matter for burns. Any 7 matches any other 7, and any joker matches
+any other joker.
+
+Successful burn, your own card:
+
+- Remove your card from your board.
+- The slot becomes empty.
+
+Successful burn, opponent's card:
+
+- Remove the opponent's matching card.
+- Give one of your own live cards into that opponent's burned slot, face down.
+- Your given slot becomes empty.
+
+Failed burn:
+
+- The revealed card stays on the board face up.
+- You take a penalty card from the draw pile.
+- The penalty goes into your first empty slot, or into a new extra slot if your
+  board is full.
+
+You cannot burn a card that was just placed from taking the discard until a new
+discard top is created.
+
+
+10. Calling
+-----------
+
+On your turn, before drawing or taking the discard, you may call.
+
+When you call:
+
+- You become protected from opponents' switch abilities.
+- If you are the first caller of the round, every other player gets one final
+  turn.
+- After those final turns finish, the round ends and scores.
+- If someone else already called, calling only gives you protection. It does
+  not create another set of final turns.
+
+Calling uses your turn. You do not also draw or take the discard.
+
+
+11. Scoring A Round
+-------------------
+
+When the round ends:
+
+1. Add the values of each player's remaining board cards.
+2. Empty slots count as 0.
+3. If any hand total is negative, add enough points to every hand so that no
+   player's round score is negative.
+4. If the first caller has the strictly highest raw hand total, that caller's
+   round score is doubled.
+5. Add each player's round score to their running score.
+
+The next round starts with a player who had the lowest raw hand total. If the
+first caller is tied for lowest, prefer another tied low player to start.
+
+
+12. Game End
+------------
+
+After scoring a round:
+
+- If no player has reached the target score, play another round.
+- If one or more players have reached or passed the target score, the game ends.
+- Among the players at or over the target, the highest score loses.
+
+
+13. Quick Reference
+-------------------
+
+On your turn:
+
+- Call
+- Take discard and swap
+- Draw, then swap or play
+
+Anytime, if eligible:
+
+- Burn a board card that matches the discard rank
+
+Special cards when played from a deck draw:
+
+- 7 or 8: peek own
+- 9 or 10: peek opponent
+- Jack or Queen: switch unseen
+- Black King: peek two, then choose whether to switch
