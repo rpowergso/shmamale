@@ -121,14 +121,19 @@ discard pile. They do not trigger when a card is swapped into your board.
 
 Jack or Queen:
 
-- Choose any two live board cards and swap them without looking.
+- Choose two live board cards one at a time.
+- Each chosen card is moved into the ability tray face down.
+- After the second card is chosen, the two cards switch places.
 - The cards may belong to you, opponents, or one of each.
 
 Black King:
 
-- Choose two live board cards.
-- Look at both.
+- Choose up to two live board cards one at a time.
+- Each chosen card is moved into the ability tray face up.
 - Decide whether to swap them or leave them where they are.
+- A selected King that matches the discard may be burned.
+- If either selected card is burned, you may finish inspecting the second card,
+  but the remaining card can only be put back and the pair cannot be switched.
 
 Red Kings have no special ability.
 
@@ -145,6 +150,7 @@ You may attempt a burn when:
 
 - The round is still playing.
 - There is a top discard card.
+- The current top discard has not already produced a successful burn.
 - No burn-give action is waiting.
 - You are not currently holding a drawn or taken card.
 
@@ -157,14 +163,20 @@ To burn:
 Suits do not matter for burns. Any 7 matches any other 7, and any joker matches
 any other joker.
 
+Only one card may be successfully burned on each discard card. The burned card
+is placed on top of the discard pile but cannot itself be used to start another
+burn. This prevents chained burns.
+
 Successful burn, your own card:
 
 - Remove your card from your board.
+- Place the burned card on top of the discard pile.
 - The slot becomes empty.
 
 Successful burn, opponent's card:
 
 - Remove the opponent's matching card.
+- Place the burned card on top of the discard pile.
 - Give one of your own live cards into that opponent's burned slot, face down.
 - Your given slot becomes empty.
 
@@ -187,6 +199,8 @@ On your turn, before drawing or taking the discard, you may call.
 When you call:
 
 - You become protected from opponents' switch abilities.
+- You cannot take any more game actions for the rest of the round, including
+  drawing, taking the discard, using abilities, or attempting burns.
 - If you are the first caller of the round, every other player gets one final
   turn.
 - After those final turns finish, the round ends and scores.

@@ -150,3 +150,274 @@ def ability_label(ability):
         "switch_peek": "Look at two cards, then choose whether to switch",
     }
     return labels.get(ability, "")
+
+
+# Shared room, board, and discard helpers used by both human and bot modes.
+
+def default_settings():
+    return {
+        "target_score": 50,
+        "deck_count": 1,
+        "jokers": 2,
+        "bot_count": 0,
+        "bot_difficulty": "medium",
+    }
+
+
+def new_room(host_sid):
+    return {
+        "status": "lobby",
+        "host_sid": host_sid,
+        "settings": default_settings(),
+        "round_number": 0,
+        "players": {},
+        "player_order": [],
+        "draw_pile": [],
+        "discard_pile": [],
+        "turn_index": 0,
+        "phase": "lobby",
+        "pending_draw": None,
+        "pending_ability": None,
+        "pending_burn": None,
+        "held_peek": None,
+        "first_caller_sid": None,
+        "final_turns_remaining": [],
+        "final_countdown_token": 0,
+        "final_countdown_deadline": None,
+        "next_start_sid": None,
+        "round_results": None,
+        "winner_summary": None,
+        "action_log": [],
+        "bot_mode": False,
+        "bot_scheduled_key": None,
+        "bot_burn_checked_card_id": None,
+        "discard_epoch": 0,
+        "burn_locked_discard_ids": set(),
+        "burnt_slots": [],
+        "burn_blockers": [],
+        "action_sequence": 0,
+        "last_action": None,
+    }
+
+
+def is_bot_player(player):
+    return player.get("is_bot", False)
+
+
+def make_player(username, is_bot=False, difficulty=None, bot_policy=None):
+    return {
+        "username": username,
+        "ready": is_bot,
+        "score": 0,
+        "board": empty_board(),
+        "called": False,
+        "protected": False,
+        "first_turn_started": False,
+        "opening_peeked": set(),
+        "connected": True,
+        "is_bot": is_bot,
+        "difficulty": difficulty or "",
+        "bot_policy": bot_policy or {},
+    }
+
+
+def player_name(game, sid):
+    player = game["players"].get(sid)
+    return player["username"] if player else "Player"
+
+
+def add_log(game, message):
+    game["action_log"].append(message)
+    game["action_log"] = game["action_log"][-8:]
+
+
+def slot_key(owner_sid, index):
+    return f"{owner_sid}:{index}"
+
+
+def reset_discard_burn_state(game):
+    game["discard_epoch"] = game.get("discard_epoch", 0) + 1
+    game["burnt_slots"] = []
+    game["burn_blockers"] = []
+    game["bot_burn_checked_card_id"] = None
+
+
+def burn_locked_discard_ids(game):
+    return game.setdefault("burn_locked_discard_ids", set())
+
+
+def is_discard_burn_locked(game, card=None):
+    if card is None:
+        if not game.get("discard_pile"):
+            return False
+        card = game["discard_pile"][-1]
+    return card["id"] in burn_locked_discard_ids(game)
+
+
+def lock_discard_card_for_burn(game, card):
+    if card:
+        burn_locked_discard_ids(game).add(card["id"])
+
+
+def unlock_discard_card_for_burn(game, card):
+    if card:
+        burn_locked_discard_ids(game).discard(card["id"])
+
+
+def mark_slot_burnt(game, owner_sid, index):
+    key = slot_key(owner_sid, index)
+    if key not in game["burnt_slots"]:
+        game["burnt_slots"].append(key)
+
+
+def is_slot_burnt(game, owner_sid, index):
+    return slot_key(owner_sid, index) in game.get("burnt_slots", [])
+
+
+def add_burn_blocker(game, owner_sid, index, card_id):
+    game.setdefault("burn_blockers", []).append(
+        {"owner_sid": owner_sid, "index": index, "card_id": card_id}
+    )
+
+
+def clear_burn_blockers(game):
+    game["burn_blockers"] = []
+
+
+def is_burn_blocked(game, owner_sid, index, card_id=None):
+    for blocker in game.get("burn_blockers", []):
+        if blocker["owner_sid"] != owner_sid or blocker["index"] != index:
+            continue
+        if card_id is None or blocker["card_id"] == card_id:
+            return True
+    return False
+
+
+def first_empty_slot(board):
+    for index, slot in enumerate(board):
+        if not slot or not slot.get("card"):
+            return index
+    return None
+
+
+def deal_penalty_card(game, burner_sid):
+    if not game["draw_pile"]:
+        if len(game["discard_pile"]) > 1:
+            recycled = game["discard_pile"][:-1]
+            for recycled_card in recycled:
+                unlock_discard_card_for_burn(game, recycled_card)
+            random.shuffle(recycled)
+            game["draw_pile"] = recycled
+            game["discard_pile"] = [game["discard_pile"][-1]]
+        else:
+            return None
+
+    card = game["draw_pile"].pop()
+    board = game["players"][burner_sid]["board"]
+    empty = first_empty_slot(board)
+    if empty is not None:
+        board[empty] = make_slot(card)
+        index = empty
+    else:
+        board.append(make_slot(card))
+        index = len(board) - 1
+    return {
+        "index": index,
+        "card": public_card(card),
+        "replaced": None,
+        "expanded": empty is None,
+    }
+
+
+def discard_card(game, card, reset_burns=True, burn_locked=False):
+    unlock_discard_card_for_burn(game, card)
+    game["discard_pile"].append(card)
+    if burn_locked:
+        lock_discard_card_for_burn(game, card)
+    if reset_burns:
+        reset_discard_burn_state(game)
+
+
+def discard_burned_card(game, card):
+    if game.get("discard_pile"):
+        lock_discard_card_for_burn(game, game["discard_pile"][-1])
+    discard_card(game, card, burn_locked=True)
+
+
+def can_attempt_burn(game, burner_sid):
+    if game["status"] != "playing":
+        return False, "The round is not active."
+    player = game["players"].get(burner_sid)
+    if not player:
+        return False, "You are not in this game."
+    if player.get("called"):
+        return False, "You already called and cannot take any more actions this round."
+    if game.get("pending_burn"):
+        return False, "Finish the current burn first."
+    if not game["discard_pile"]:
+        return False, "There is no discard to burn against."
+    if is_discard_burn_locked(game):
+        return False, "That discard has already had a card burned on it."
+    pending = game.get("pending_draw")
+    if pending and pending.get("sid") == burner_sid:
+        return False, "You cannot burn while holding a card."
+    return True, None
+
+
+def current_sid(game):
+    if not game["player_order"]:
+        return None
+    return game["player_order"][game["turn_index"] % len(game["player_order"])]
+
+
+def live_player_sids(game):
+    return [sid for sid in game["player_order"] if sid in game["players"]]
+
+
+def slot_at(game, owner_sid, index):
+    if owner_sid not in game["players"]:
+        return None
+    if index < 0 or index >= len(game["players"][owner_sid]["board"]):
+        return None
+    return game["players"][owner_sid]["board"][index]
+
+
+def protected_from_switch(game, actor_sid, owner_sid):
+    return owner_sid != actor_sid and game["players"][owner_sid].get("protected", False)
+
+
+def live_slots_for(game, sid):
+    return [
+        (index, slot)
+        for index, slot in enumerate(game["players"][sid]["board"])
+        if slot and slot.get("card")
+    ]
+
+
+def all_switchable_slots(game, actor_sid):
+    slots = []
+    for owner_sid in game["player_order"]:
+        if owner_sid not in game["players"]:
+            continue
+        if protected_from_switch(game, actor_sid, owner_sid):
+            continue
+        for index, slot in live_slots_for(game, owner_sid):
+            slots.append((owner_sid, index, slot))
+    return slots
+
+
+def swap_slots(game, first_owner, first_index, second_owner, second_index):
+    first_board = game["players"][first_owner]["board"]
+    second_board = game["players"][second_owner]["board"]
+    first_board[first_index], second_board[second_index] = (
+        second_board[second_index],
+        first_board[first_index],
+    )
+
+
+def mark_turn_started(game):
+    sid = current_sid(game)
+    if sid and sid in game["players"]:
+        player = game["players"][sid]
+        player["first_turn_started"] = True
+        player["opening_peeked"] = set()
