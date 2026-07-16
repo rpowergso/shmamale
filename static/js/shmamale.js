@@ -47,6 +47,7 @@ document.addEventListener("DOMContentLoaded", () => {
         if (els.seats && state.players) renderSeats();
         else if (els.seats) layoutNameplates(rotatedOrder());
         layoutArLabels();
+        layoutAbilityTray();
     });
 });
 
@@ -103,6 +104,10 @@ async function applyGameState(nextState) {
             const who = nextState.players[action.sid]?.username || "A player";
             const own = action.owner_sid === action.sid;
             showToast(own ? `${who} looked at a card.` : `${who} looked at someone's card.`);
+        }
+        if (action.type === "burn_fail") {
+            const who = nextState.players[action.sid]?.username || "A player";
+            showToast(`${who} failed a burn and drew a penalty card.`);
         }
         render({ hideAnimTargets: true, action });
         await playActionAnimation(action, anchors);
@@ -236,6 +241,7 @@ function cardAtPoint(clientX, clientY) {
     let best = null;
     let bestDist = Infinity;
     document.querySelectorAll(".board-card").forEach((card) => {
+        if (card.classList.contains("ability-picked-up")) return;
         const r = card.getBoundingClientRect();
         if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return;
         const cx = (r.left + r.right) / 2;
@@ -421,7 +427,7 @@ function renderGame(options = {}) {
     els.phaseText.textContent = phaseText();
 
     renderScores();
-    renderPiles();
+    renderPiles(options);
     renderSeats(options);
     layoutArLabels();
     renderAbilityOverlay();
@@ -464,7 +470,7 @@ function renderScores() {
 }
 
 function renderCallBtn() {
-    const canChoose = state.status === "playing" && state.phase === "choose" && state.current_turn_sid === mySid;
+    const canChoose = canChooseNow();
     els.callBtn.disabled = !canChoose || Boolean(state.pending_burn) || animating;
     els.callBtn.textContent = state.first_caller_sid ? "PROTECT" : "CALL";
 }
@@ -474,6 +480,7 @@ function canChooseNow() {
         state.status === "playing"
         && state.phase === "choose"
         && state.current_turn_sid === mySid
+        && !state.players[mySid]?.called
         && !state.pending_burn
     );
 }
@@ -486,9 +493,28 @@ function playerIsHolding(sid) {
     return Boolean(state.pending_draw && state.pending_draw.sid === sid);
 }
 
-function renderPiles() {
-    els.drawCount.textContent = String(state.draw_count);
-    els.discardCount.textContent = String(state.discard_count);
+function renderPiles(options = {}) {
+    const keepPreviousDiscard = Boolean(
+        options.hideAnimTargets
+        && prevState
+        && (
+            options.action?.type === "swap"
+            || options.action?.type === "play"
+            || options.action?.type === "burn"
+        )
+    );
+    const keepPreviousDraw = Boolean(
+        options.hideAnimTargets
+        && prevState
+        && options.action?.type === "burn_fail"
+        && options.action?.penalty
+    );
+    const visibleDiscard = keepPreviousDiscard ? prevState.discard_top : state.discard_top;
+    const visibleDiscardCount = keepPreviousDiscard ? prevState.discard_count : state.discard_count;
+    const visibleDrawCount = keepPreviousDraw ? prevState.draw_count : state.draw_count;
+
+    els.drawCount.textContent = String(visibleDrawCount);
+    els.discardCount.textContent = String(visibleDiscardCount);
 
     const choose = canChooseNow();
     const holding = holdingMyDraw();
@@ -501,9 +527,9 @@ function renderPiles() {
     els.drawBtn.disabled = !choose || state.draw_count === 0;
     els.discardBtn.disabled = !(choose && state.discard_top) && !canPlay;
 
-    if (state.discard_top) {
-        els.discardBtn.className = `playing-card pile-card ${colorClass(state.discard_top)}`;
-        els.discardBtn.innerHTML = cardFaceHtml(state.discard_top);
+    if (visibleDiscard) {
+        els.discardBtn.className = `playing-card pile-card ${colorClass(visibleDiscard)}`;
+        els.discardBtn.innerHTML = cardFaceHtml(visibleDiscard);
     } else {
         els.discardBtn.className = "playing-card pile-card empty-card";
         els.discardBtn.textContent = "EMPTY";
@@ -604,10 +630,18 @@ const TABLE = {
     depth: 7,
     cameraDistance: 7,
     cameraHeight: 13,
-    cardWidth: 0.70,
-    cardHeight: 0.98,
-    cardGap: 0.08,
-    rimFraction: 0.925,
+    cardWidth: 0.77,
+    cardHeight: 1.078,
+    cardGap: 0.09,
+    heldCardGap: 0.43,
+    heldCardTilt: -74,
+    pileY: -0.20,
+    rimFraction: 0.95,
+    centerClearanceX: 1.40,
+    centerClearanceY: 0.86,
+    maxBoardWidth: 3.20,
+    maxBoardHeight: 2.72,
+    minSeatScale: 0.12,
     ringByCount: {
         2: 0.70,
         3: 0.72,
@@ -668,6 +702,7 @@ function applyTableCameraSettings() {
         "--card-gap": `${gap.toFixed(3)}px`,
         "--grid-width-2": `${(cardWidth * 2 + gap).toFixed(3)}px`,
         "--grid-width-3": `${(cardWidth * 3 + gap * 2).toFixed(3)}px`,
+        "--pile-world-y": `${(TABLE.pileY * scale).toFixed(3)}px`,
     };
     const handLayer = document.querySelector(".hand-overlays");
     Object.entries(vars).forEach(([name, value]) => {
@@ -711,55 +746,194 @@ function seatDensityScale(count) {
     return 1;
 }
 
-function boardFootprintWorld(count, sid, isLocal, scale) {
+function boardShape(sid) {
     const player = state?.players?.[sid];
     const boardLength = player?.board?.length || 4;
     const cols = gridColsForBoard(boardLength);
     const rows = Math.max(1, Math.ceil(boardLength / cols));
     const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
     const boardHeight = rows * TABLE.cardHeight + (rows - 1) * TABLE.cardGap;
+    return { boardLength, cols, rows, boardWidth, boardHeight };
+}
 
+function boardGrowthScale(sid) {
+    const shape = boardShape(sid);
+    return Math.max(
+        TABLE.minSeatScale,
+        Math.min(
+            1,
+            TABLE.maxBoardWidth / shape.boardWidth,
+            TABLE.maxBoardHeight / shape.boardHeight,
+        ),
+    );
+}
+
+function boardFootprintWorld(sid, scale) {
+    const shape = boardShape(sid);
     return {
-        xMin: (-boardWidth / 2) * scale,
-        xMax: (boardWidth / 2) * scale,
-        yMin: (-boardHeight / 2) * scale,
-        yMax: (boardHeight / 2) * scale,
+        xMin: (-shape.boardWidth / 2) * scale,
+        xMax: (shape.boardWidth / 2) * scale,
+        yMin: (-shape.boardHeight / 2) * scale,
+        yMax: (shape.boardHeight / 2) * scale,
     };
 }
 
 function seatPoseAt(phi, ring) {
-    const center = {
-        x: TABLE.width / 2 * ring * Math.cos(phi),
-        y: TABLE.depth / 2 * ring * Math.sin(phi),
+    const radial = {
+        x: TABLE.width / 2 * Math.cos(phi),
+        y: TABLE.depth / 2 * Math.sin(phi),
     };
-    const length = Math.hypot(center.x, center.y) || 1;
-    return { center, outward: { x: center.x / length, y: center.y / length } };
+    const center = { x: radial.x * ring, y: radial.y * ring };
+    const length = Math.hypot(radial.x, radial.y) || 1;
+    return { center, outward: { x: radial.x / length, y: radial.y / length } };
 }
 
 /** Density scale by player count only — never by camera depth. */
-function footprintInsideEllipse(center, outward, footprint) {
+function footprintCorners(center, outward, footprint) {
     const tangent = { x: outward.y, y: -outward.x };
+    return [
+        [footprint.xMin, footprint.yMin],
+        [footprint.xMax, footprint.yMin],
+        [footprint.xMax, footprint.yMax],
+        [footprint.xMin, footprint.yMax],
+    ].map(([lx, ly]) => ({
+            x: center.x + tangent.x * lx + outward.x * ly,
+            y: center.y + tangent.y * lx + outward.y * ly,
+        }));
+}
+
+function footprintInsideEllipse(center, outward, footprint) {
     const a = TABLE.width / 2 * TABLE.rimFraction;
     const b = TABLE.depth / 2 * TABLE.rimFraction;
-    return [footprint.xMin, footprint.xMax].every((lx) => (
-        [footprint.yMin, footprint.yMax].every((ly) => {
-            const x = center.x + tangent.x * lx + outward.x * ly;
-            const y = center.y + tangent.y * lx + outward.y * ly;
-            return (x / a) ** 2 + (y / b) ** 2 <= 1;
-        })
+    return footprintCorners(center, outward, footprint).every((point) => (
+        (point.x / a) ** 2 + (point.y / b) ** 2 <= 1
     ));
 }
 
-function solveSeatRing(phi, requested, footprint) {
-    let low = 0.40;
-    let high = requested;
+function pointInsidePolygon(point, polygon) {
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i, i += 1) {
+        const a = polygon[i];
+        const b = polygon[j];
+        const crosses = ((a.y > point.y) !== (b.y > point.y))
+            && point.x < ((b.x - a.x) * (point.y - a.y)) / ((b.y - a.y) || 1e-9) + a.x;
+        if (crosses) inside = !inside;
+    }
+    return inside;
+}
+
+function distanceToSegment(point, a, b) {
+    const dx = b.x - a.x;
+    const dy = b.y - a.y;
+    const lengthSq = dx * dx + dy * dy;
+    if (lengthSq <= 1e-12) return Math.hypot(point.x - a.x, point.y - a.y);
+    const t = Math.max(
+        0,
+        Math.min(1, ((point.x - a.x) * dx + (point.y - a.y) * dy) / lengthSq),
+    );
+    return Math.hypot(point.x - (a.x + dx * t), point.y - (a.y + dy * t));
+}
+
+function footprintOutsideCenter(center, outward, footprint) {
+    const normalized = footprintCorners(center, outward, footprint).map((point) => ({
+        x: point.x / TABLE.centerClearanceX,
+        y: (point.y - TABLE.pileY) / TABLE.centerClearanceY,
+    }));
+    if (pointInsidePolygon({ x: 0, y: 0 }, normalized)) return false;
+    let distance = Infinity;
+    for (let i = 0; i < normalized.length; i += 1) {
+        distance = Math.min(
+            distance,
+            distanceToSegment(
+                { x: 0, y: 0 },
+                normalized[i],
+                normalized[(i + 1) % normalized.length],
+            ),
+        );
+    }
+    return distance >= 1;
+}
+
+function outerRingLimit(phi, footprint) {
+    const centerPose = seatPoseAt(phi, 0);
+    if (!footprintInsideEllipse(centerPose.center, centerPose.outward, footprint)) return null;
+    const edgePose = seatPoseAt(phi, 1);
+    if (footprintInsideEllipse(edgePose.center, edgePose.outward, footprint)) return 1;
+    let low = 0;
+    let high = 1;
     for (let i = 0; i < 24; i += 1) {
         const mid = (low + high) / 2;
         const pose = seatPoseAt(phi, mid);
         if (footprintInsideEllipse(pose.center, pose.outward, footprint)) low = mid;
         else high = mid;
     }
-    return { ring: low, ...seatPoseAt(phi, low) };
+    return low;
+}
+
+function innerRingLimit(phi, outerLimit, footprint) {
+    const centerPose = seatPoseAt(phi, 0);
+    if (footprintOutsideCenter(centerPose.center, centerPose.outward, footprint)) return 0;
+    const outerPose = seatPoseAt(phi, outerLimit);
+    if (!footprintOutsideCenter(outerPose.center, outerPose.outward, footprint)) return null;
+    let low = 0;
+    let high = outerLimit;
+    for (let i = 0; i < 24; i += 1) {
+        const mid = (low + high) / 2;
+        const pose = seatPoseAt(phi, mid);
+        if (footprintOutsideCenter(pose.center, pose.outward, footprint)) high = mid;
+        else low = mid;
+    }
+    return high;
+}
+
+function solveSeatPlacement(phi, requestedRing, requestedScale, sid) {
+    let scale = Math.max(TABLE.minSeatScale, requestedScale);
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+        const footprint = boardFootprintWorld(sid, scale);
+        const outerLimit = outerRingLimit(phi, footprint);
+        if (outerLimit != null) {
+            const innerLimit = innerRingLimit(phi, outerLimit, footprint);
+            if (innerLimit != null && innerLimit <= outerLimit) {
+                const ring = Math.max(innerLimit, Math.min(requestedRing, outerLimit));
+                return {
+                    scale,
+                    ring,
+                    footprint,
+                    ...seatPoseAt(phi, ring),
+                };
+            }
+        }
+        scale = Math.max(TABLE.minSeatScale, scale - 0.025);
+    }
+    const footprint = boardFootprintWorld(sid, TABLE.minSeatScale);
+    const outerLimit = outerRingLimit(phi, footprint);
+    const ring = Math.min(requestedRing, outerLimit == null ? requestedRing : outerLimit);
+    return {
+        scale: TABLE.minSeatScale,
+        ring,
+        footprint,
+        ...seatPoseAt(phi, ring),
+    };
+}
+
+function polygonAxes(polygon) {
+    return polygon.map((point, index) => {
+        const next = polygon[(index + 1) % polygon.length];
+        const dx = next.x - point.x;
+        const dy = next.y - point.y;
+        const length = Math.hypot(dx, dy) || 1;
+        return { x: -dy / length, y: dx / length };
+    });
+}
+
+function polygonsOverlap(first, second, padding = 0.06) {
+    return [...polygonAxes(first), ...polygonAxes(second)].every((axis) => {
+        const project = (polygon) => polygon.map((point) => point.x * axis.x + point.y * axis.y);
+        const a = project(first);
+        const b = project(second);
+        return Math.max(...a) + padding >= Math.min(...b)
+            && Math.max(...b) + padding >= Math.min(...a);
+    });
 }
 
 function seatLayout(order) {
@@ -769,23 +943,76 @@ function seatLayout(order) {
 
     const specs = azList.map((azimuthDeg, i) => {
         const sid = order[i];
-        const isLocal = i === 0;
-        const scale = seatDensityScale(n);
-        const footprint = boardFootprintWorld(n, sid, isLocal, scale);
-        const phi = ((90 + azimuthDeg) * Math.PI) / 180;
-        const maxRing = solveSeatRing(phi, baseRing, footprint).ring;
-        return { sid, isLocal, scale, phi, maxRing };
+        return {
+            sid,
+            isLocal: i === 0,
+            phi: ((90 + azimuthDeg) * Math.PI) / 180,
+            scaleCap: seatDensityScale(n) * boardGrowthScale(sid),
+        };
     });
-    const sharedRing = Math.min(baseRing, ...specs.map((spec) => spec.maxRing));
 
-    return specs.map((spec) => {
-        const { isLocal, scale, phi } = spec;
-        // Keep the near board above the calculated leg attachment at y=3.414.
-        const nearLegY = TABLE.depth / 2 * Math.sqrt(1 - 0.22 ** 2);
-        const nearFootprint = boardFootprintWorld(n, spec.sid, isLocal, scale);
-        const nearRingLimit = (nearLegY - nearFootprint.yMax - 0.58) / (TABLE.depth / 2);
-        const ring = isLocal ? Math.min(sharedRing, nearRingLimit) : sharedRing;
-        const pose = seatPoseAt(phi, ring);
+    let placements = [];
+    for (let pass = 0; pass < 18; pass += 1) {
+        placements = specs.map((spec) => (
+            solveSeatPlacement(spec.phi, baseRing, spec.scaleCap, spec.sid)
+        ));
+        const collisions = new Set();
+        placements.forEach((placement, index) => {
+            const first = footprintCorners(
+                placement.center,
+                placement.outward,
+                placement.footprint,
+            );
+            placements.slice(index + 1).forEach((other, offset) => {
+                const secondIndex = index + offset + 1;
+                const second = footprintCorners(
+                    other.center,
+                    other.outward,
+                    other.footprint,
+                );
+                if (polygonsOverlap(first, second)) {
+                    collisions.add(index);
+                    collisions.add(secondIndex);
+                }
+            });
+        });
+        if (!collisions.size) break;
+        collisions.forEach((index) => {
+            specs[index].scaleCap = Math.max(
+                TABLE.minSeatScale,
+                placements[index].scale * 0.93,
+            );
+        });
+    }
+
+    const equalBoardGroups = new Map();
+    specs.forEach((spec, index) => {
+        const length = boardShape(spec.sid).boardLength;
+        if (!equalBoardGroups.has(length)) equalBoardGroups.set(length, []);
+        equalBoardGroups.get(length).push(index);
+    });
+    let normalizedScale = false;
+    equalBoardGroups.forEach((indices) => {
+        if (indices.length < 2) return;
+        const sharedScale = Math.min(...indices.map((index) => placements[index].scale));
+        indices.forEach((index) => {
+            if (specs[index].scaleCap > sharedScale) {
+                specs[index].scaleCap = sharedScale;
+                normalizedScale = true;
+            }
+        });
+    });
+    if (normalizedScale) {
+        placements = specs.map((spec) => (
+            solveSeatPlacement(spec.phi, baseRing, spec.scaleCap, spec.sid)
+        ));
+    }
+
+    return specs.map((spec, index) => {
+        const { isLocal, phi } = spec;
+        const placement = placements[index];
+        const { scale, ring } = placement;
+        const pose = placement;
         const left = 50 + pose.center.x / TABLE.width * 100;
         const top = 50 + pose.center.y / TABLE.depth * 100;
 
@@ -825,7 +1052,7 @@ function renderSeats(options = {}) {
 
 function renderHands(order, options = {}) {
     if (!els.hands) return;
-    els.hands.innerHTML = order.map((sid) => {
+    els.hands.innerHTML = order.filter((sid) => !state.players[sid]?.is_bot).map((sid) => {
         const hideHeld = options.hideAnimTargets && options.action
             && (options.action.type === "draw" || options.action.type === "take")
             && options.action.sid === sid;
@@ -841,6 +1068,7 @@ function layoutHands(order) {
     const stageRect = stage.getBoundingClientRect();
     const layerRect = els.hands.getBoundingClientRect();
     order.forEach((sid) => {
+        if (state.players[sid]?.is_bot) return;
         const hand = els.hands.querySelector(`[data-held="${CSS.escape(sid)}"]`);
         const frame = seatWorldFrame(sid);
         const anchor = heldWorldAnchor(sid);
@@ -1035,6 +1263,17 @@ window.getTableProjectionDiagnostics = function getTableProjectionDiagnostics() 
         ).toFixed(4))),
         facingDots,
         overlaps,
+        centerClearance: {
+            x: TABLE.centerClearanceX,
+            y: TABLE.centerClearanceY,
+            pileY: TABLE.pileY,
+        },
+        boardLayouts: seats.map((seat) => ({
+            sid: seat.dataset.sid,
+            cards: state.players[seat.dataset.sid]?.board?.length || 0,
+            scale: Number(seat.style.getPropertyValue("--seat-scale")),
+            ring: Number(seat.style.getPropertyValue("--seat-ring")),
+        })),
         rings: seats.map((seat) => Number(seat.style.getPropertyValue("--seat-ring"))),
     };
 };
@@ -1052,18 +1291,49 @@ function renderSeat(sid, position, options = {}) {
         && options.action.sid === sid
         ? options.action.index
         : -1;
-    const hiddenSwitchSlots = options.hideAnimTargets && options.action?.type === "switch"
-        ? [options.action.a, options.action.b]
-            .filter((item) => item?.owner_sid === sid)
-            .map((item) => item.index)
-        : [];
+    const hiddenAnimationSlots = [];
+    if (options.hideAnimTargets && options.action?.type === "switch") {
+        hiddenAnimationSlots.push(
+            ...[options.action.a, options.action.b]
+                .filter((item) => item?.owner_sid === sid)
+                .map((item) => item.index),
+        );
+    }
+    if (options.hideAnimTargets && options.action?.type === "ability_put_back") {
+        hiddenAnimationSlots.push(
+            ...(options.action.cards || [])
+                .filter((item) => item?.owner_sid === sid)
+                .map((item) => item.index),
+        );
+    }
+    if (
+        options.hideAnimTargets
+        && options.action?.type === "burn_give"
+        && options.action.target_sid === sid
+    ) {
+        hiddenAnimationSlots.push(options.action.target_index);
+    }
+    if (options.hideAnimTargets && options.action?.type === "burn_fail") {
+        if (options.action.owner_sid === sid) {
+            hiddenAnimationSlots.push(options.action.index);
+        }
+        if (options.action.sid === sid && options.action.penalty) {
+            hiddenAnimationSlots.push(options.action.penalty.index);
+        }
+    }
 
-    const cols = player.board.length <= 4 ? 2 : Math.min(3, Math.ceil(player.board.length / 2));
+    const cols = gridColsForBoard(player.board.length);
     const cards = player.board
         .map((slot, index) => renderBoardCard(sid, index, slot, {
-            hidden: index === hideSlot || hiddenSwitchSlots.includes(index),
+            hidden: index === hideSlot || hiddenAnimationSlots.includes(index),
         }))
         .join("");
+    const hideBotHeld = options.hideAnimTargets && options.action
+        && (options.action.type === "draw" || options.action.type === "take")
+        && options.action.sid === sid;
+    const botHeld = player.is_bot
+        ? renderBotHeldSlot(sid, { hidden: hideBotHeld })
+        : "";
 
     const style = [
         `--seat-width:var(--grid-width-${cols})`,
@@ -1084,9 +1354,26 @@ function renderSeat(sid, position, options = {}) {
             <div class="seat-scale">
                 <div class="seat-board">
                     <div class="card-grid cols-${cols}" data-grid="${sid}">${cards}</div>
+                    ${botHeld}
                 </div>
             </div>
         </section>
+    `;
+}
+
+function renderBotHeldSlot(sid, options = {}) {
+    const holding = playerIsHolding(sid);
+    const peek = state.held_peek?.sid === sid ? state.held_peek : null;
+    if (!holding && !peek) return "";
+    const hiddenClass = options.hidden ? " anim-hidden" : "";
+    return `
+        <div
+            class="bot-held-slot${hiddenClass}"
+            data-held="${sid}"
+            style="--held-card-tilt:${TABLE.heldCardTilt}deg"
+        >
+            <div class="card-back held-card" data-held-card="${sid}"></div>
+        </div>
     `;
 }
 
@@ -1163,6 +1450,14 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     const classes = ["board-card", slot.faceUp ? "face-up" : "face-down"];
     if (slot.faceUp && slot.card) classes.push(colorClass(slot.card));
     if (selected) classes.push("selected");
+    if (
+        selected
+        && !state.pending_burn
+        && state.pending_ability?.sid === mySid
+        && (state.pending_ability.type === "switch_unseen" || state.pending_ability.type === "switch_peek")
+    ) {
+        classes.push("ability-picked-up");
+    }
     if (burnt) classes.push("burnt");
     if (highlight) classes.push("swap-mark");
     if (looked) classes.push("looked-mark");
@@ -1197,6 +1492,7 @@ function shouldHighlightSlot(ownerSid, index) {
 
 function isClickable(ownerSid, index, slot) {
     if (slot.empty || animating) return false;
+    if (state.players[mySid]?.called) return false;
 
     if (canOpeningPeek(ownerSid, index, slot)) return true;
 
@@ -1212,6 +1508,7 @@ function isClickable(ownerSid, index, slot) {
             if (type === "peek_own") return ownerSid === mySid;
             if (type === "peek_other") return ownerSid !== mySid;
             if (type === "switch_unseen" || type === "switch_peek") {
+                if (isSelectedByAbility(ownerSid, index)) return false;
                 return !(ownerSid !== mySid && state.players[ownerSid].protected);
             }
         }
@@ -1222,7 +1519,13 @@ function isClickable(ownerSid, index, slot) {
         return ownerSid === mySid;
     }
 
-    if (state.status === "playing" && state.discard_top && !state.pending_burn && !holdingMyDraw()) {
+    if (
+        state.status === "playing"
+        && state.discard_top
+        && state.discard_burn_available
+        && !state.pending_burn
+        && !holdingMyDraw()
+    ) {
         if (isBurnBlocked(ownerSid, index)) return false;
         return true;
     }
@@ -1237,6 +1540,10 @@ function isSelectedByAbility(ownerSid, index) {
 
 function cardClicked(ownerSid, index) {
     if (!state || animating) return;
+    if (state.players[mySid]?.called) {
+        showToast("You already called and cannot take any more actions this round.");
+        return;
+    }
 
     const slot = state.players[ownerSid]?.board?.[index];
     if (slot && canOpeningPeek(ownerSid, index, slot)) {
@@ -1255,6 +1562,7 @@ function cardClicked(ownerSid, index) {
 
     // Ability before hold-swap / burn so peek/switch clicks always land.
     if (state.pending_ability?.sid === mySid && state.phase === "ability") {
+        if (isSelectedByAbility(ownerSid, index)) return;
         const stage = state.pending_ability.stage;
         if (stage === "selecting" || stage === "waiting") {
             socket.emit("ability_select_card", { room: ROOM_ID, owner_sid: ownerSid, index });
@@ -1271,7 +1579,16 @@ function cardClicked(ownerSid, index) {
         return;
     }
 
-    if (state.status === "playing" && state.discard_top && !state.pending_burn && !holdingMyDraw()) {
+    if (
+        state.status === "playing"
+        && state.discard_top
+        && !state.pending_burn
+        && !holdingMyDraw()
+    ) {
+        if (!state.discard_burn_available) {
+            showToast("That discard has already had a card burned on it.");
+            return;
+        }
         socket.emit("burn_card", { room: ROOM_ID, owner_sid: ownerSid, index });
         return;
     }
@@ -1279,6 +1596,139 @@ function cardClicked(ownerSid, index) {
     if (state.status === "playing" && !state.discard_top) {
         showToast("Nothing to burn against — discard is empty.");
     }
+}
+
+function abilityCandidateKey(item) {
+    return `${item?.owner_sid || ""}:${item?.index ?? ""}`;
+}
+
+function renderSwitchAbilityTray(ability) {
+    const isBlackKing = ability.type === "switch_peek";
+    const inspected = isBlackKing
+        ? ability.inspected || []
+        : ability.selected || [];
+    const liveCards = new Map(
+        (ability.peek_pair || []).map((item) => [abilityCandidateKey(item), item]),
+    );
+    const burnedCards = new Map(
+        (ability.burned_cards || []).map((item) => [abilityCandidateKey(item), item]),
+    );
+    const movedCards = new Map(
+        (ability.moved_cards || []).map((item) => [abilityCandidateKey(item), item]),
+    );
+
+    const cards = inspected.map((candidate) => {
+        const key = abilityCandidateKey(candidate);
+        const live = liveCards.get(key);
+        const burned = burnedCards.get(key);
+        const moved = movedCards.get(key);
+        const ownerName = state.players[candidate.owner_sid]?.username || "";
+        if (burned) {
+            return `
+                <div class="peek-pair-item ability-burned-item">
+                    <div class="ability-burned-card">Burned</div>
+                    <p>${escapeHtml(ownerName)} #${candidate.index + 1}</p>
+                </div>
+            `;
+        }
+        if (moved) {
+            return `
+                <div class="peek-pair-item ability-burned-item">
+                    <div class="ability-burned-card ability-given-card">Given</div>
+                    <p>${escapeHtml(ownerName)} #${candidate.index + 1}</p>
+                </div>
+            `;
+        }
+        if (isBlackKing && live) {
+            return `
+                <div class="peek-pair-item">
+                    <div
+                        class="playing-card mini-card ability-tray-card ${colorClass(live.card)}"
+                        data-ability-owner="${escapeHtml(live.owner_sid)}"
+                        data-ability-index="${live.index}"
+                    >${cardFaceHtml(live.card)}</div>
+                    <p>${escapeHtml(ownerName)} #${live.index + 1}</p>
+                    ${live.burnable
+                        ? `<button type="button" class="btn btn-purple tiny-btn" onclick="burnCard('${live.owner_sid}', ${live.index})">Burn</button>`
+                        : ""}
+                </div>
+            `;
+        }
+        return `
+            <div class="peek-pair-item">
+                <div
+                    class="card-back mini-card ability-tray-card"
+                    data-ability-owner="${escapeHtml(candidate.owner_sid)}"
+                    data-ability-index="${candidate.index}"
+                ></div>
+                <p>${escapeHtml(ownerName)} #${candidate.index + 1}</p>
+            </div>
+        `;
+    }).join("");
+
+    const count = isBlackKing
+        ? ability.inspection_count || 0
+        : (ability.selected || []).length;
+    let prompt = isBlackKing
+        ? `Inspect cards one at a time (${count}/2).`
+        : `Choose cards one at a time (${count}/2).`;
+    if (ability.stage === "switching") prompt = "Switching the selected cards…";
+    if (ability.stage === "deciding" && ability.can_switch) {
+        prompt = "Swap these cards, or put them back.";
+    } else if (ability.stage === "deciding") {
+        prompt = (ability.selected || []).length
+            ? "A selected card was burned. Put back the remaining card."
+            : "The selected cards are resolved. Finish the ability.";
+    }
+
+    let actions = "";
+    if (isBlackKing && ability.stage === "deciding") {
+        const putBackLabel = (ability.selected || []).length ? "Put Back" : "Finish";
+        actions = `
+            ${ability.can_switch
+                ? `<button class="btn btn-green tiny-btn" onclick="blackKingDecision(true)">Swap</button>`
+                : ""}
+            <button class="btn btn-gray tiny-btn" onclick="blackKingDecision(false)">${putBackLabel}</button>
+        `;
+    } else if (ability.stage !== "switching") {
+        actions = `<button class="btn btn-gray tiny-btn" onclick="skipAbility()">Put Back</button>`;
+    }
+
+    return `
+        <div class="overlay-card compact ability-tray" data-ability-tray>
+            <h2>${isBlackKing ? "Black King" : "Jack / Queen"}</h2>
+            <p>${prompt}</p>
+            <div class="peek-pair-row ability-picked-row">${cards}</div>
+            <div class="panel-actions">${actions}</div>
+        </div>
+    `;
+}
+
+function layoutAbilityTray() {
+    if (!els.abilityOverlay) return;
+    const tray = els.abilityOverlay.querySelector("[data-ability-tray]");
+    if (!tray) return;
+    const overlayRect = els.abilityOverlay.getBoundingClientRect();
+    const hand = document.querySelector(`[data-held="${CSS.escape(mySid)}"]`);
+    const seat = document.querySelector(`.seat[data-sid="${CSS.escape(mySid)}"]`);
+    const anchor = hand?.getBoundingClientRect() || seat?.getBoundingClientRect();
+    if (!anchor || overlayRect.width < 8) return;
+
+    const trayRect = tray.getBoundingClientRect();
+    const desiredLeft = anchor.left - overlayRect.left - trayRect.width / 2 - 14;
+    const desiredTop = anchor.top - overlayRect.top + anchor.height / 2;
+    const halfWidth = trayRect.width / 2;
+    const halfHeight = trayRect.height / 2;
+    const left = Math.max(
+        halfWidth + 8,
+        Math.min(overlayRect.width - halfWidth - 8, desiredLeft),
+    );
+    const top = Math.max(
+        halfHeight + 8,
+        Math.min(overlayRect.height - halfHeight - 8, desiredTop),
+    );
+    tray.style.left = `${left.toFixed(2)}px`;
+    tray.style.top = `${top.toFixed(2)}px`;
 }
 
 function renderAbilityOverlay() {
@@ -1305,25 +1755,19 @@ function renderAbilityOverlay() {
     }
 
     const ability = state.pending_ability;
-    if (ability?.sid === mySid && ability.stage === "deciding" && ability.peek_pair) {
-        const cards = ability.peek_pair.map((item) => `
-            <div class="peek-pair-item">
-                <div class="playing-card mini-card ${colorClass(item.card)}">${cardFaceHtml(item.card)}</div>
-                <p>${escapeHtml(state.players[item.owner_sid]?.username || "")} #${item.index + 1}</p>
-                ${item.burnable ? `<button type="button" class="btn btn-purple tiny-btn" onclick="burnCard('${item.owner_sid}', ${item.index})">burn</button>` : ""}
-            </div>
-        `).join("");
+    if (
+        ability?.sid === mySid
+        && (ability.type === "switch_unseen" || ability.type === "switch_peek")
+        && (
+            ability.stage === "selecting"
+            || ability.stage === "switching"
+            || ability.stage === "deciding"
+        )
+    ) {
         els.abilityOverlay.classList.remove("hidden");
-        els.abilityOverlay.innerHTML = `
-            <div class="overlay-card">
-                <h2>Black King</h2>
-                <div class="peek-pair-row">${cards}</div>
-                <div class="panel-actions">
-                    <button class="btn btn-green" onclick="blackKingDecision(true)">Swap</button>
-                    <button class="btn btn-gray" onclick="blackKingDecision(false)">Keep</button>
-                </div>
-            </div>
-        `;
+        els.abilityOverlay.classList.add("pass-through");
+        els.abilityOverlay.innerHTML = renderSwitchAbilityTray(ability);
+        requestAnimationFrame(layoutAbilityTray);
         return;
     }
 
@@ -1331,8 +1775,6 @@ function renderAbilityOverlay() {
         let prompt = "Select a card.";
         if (ability.type === "peek_own") prompt = "Select one of your cards to peek.";
         if (ability.type === "peek_other") prompt = "Select an opponent's card to peek.";
-        if (ability.type === "switch_unseen") prompt = `Select two cards to switch unseen (${ability.selected.length}/2).`;
-        if (ability.type === "switch_peek") prompt = `Select two cards to inspect (${ability.selected.length}/2).`;
         // Docked hint — must NOT cover the table (pointer-events pass through).
         els.abilityOverlay.classList.remove("hidden");
         els.abilityOverlay.classList.add("pass-through");
@@ -1414,7 +1856,9 @@ function renderHint() {
             text = "Click your board to swap. Discard pickups cannot be played.";
         }
     } else if (canChooseNow()) {
-        text = "Draw, take discard, or call. Click any board card to attempt a burn.";
+        text = state.discard_burn_available
+            ? "Draw, take discard, or call. Click any board card to attempt a burn."
+            : "Draw, take discard, or call. This discard cannot be burned again.";
     } else if (swapMark && swapMark.sid !== mySid) {
         const name = state.players[swapMark.sid]?.username || "Player";
         text = `${name} swapped slot ${swapMark.index + 1}`;
@@ -1533,10 +1977,25 @@ function heldWorldAnchor(sid) {
     if (!frame) return null;
     const boardLength = state?.players?.[sid]?.board?.length || 4;
     const cols = gridColsForBoard(boardLength);
+    const rows = Math.max(1, Math.ceil(boardLength / cols));
     const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
+    const boardHeight = rows * TABLE.cardHeight + (rows - 1) * TABLE.cardGap;
+    if (state.players[sid]?.is_bot) {
+        const localY = (
+            boardHeight / 2
+            + TABLE.heldCardGap
+            - TABLE.cardHeight / 2
+        ) * frame.scale;
+        return worldFromSeatLocal(
+            frame,
+            0,
+            localY,
+            TABLE.heldCardTilt,
+        );
+    }
     const localX = -(boardWidth / 2 + 0.14 + TABLE.cardWidth / 2) * frame.scale;
     const anchor = worldFromSeatLocal(frame, localX, 0, -TABLE.pitch * 180 / Math.PI);
-    anchor.yaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
+    anchor.yaw = uprightHandYaw(frame.yaw);
     return anchor;
 }
 
@@ -1557,8 +2016,8 @@ function captureAnchors() {
         };
     };
     const out = {
-        draw: rect(els.drawBtn, null, { x: -0.46, y: 0, yaw: 0, tilt: 0 }),
-        discard: rect(els.discardBtn, null, { x: 0.46, y: 0, yaw: 0, tilt: 0 }),
+        draw: rect(els.drawBtn, null, { x: -0.46, y: TABLE.pileY, yaw: 0, tilt: 0 }),
+        discard: rect(els.discardBtn, null, { x: 0.46, y: TABLE.pileY, yaw: 0, tilt: 0 }),
         held: {},
         boards: {},
         seats: {},
@@ -1570,15 +2029,19 @@ function captureAnchors() {
             document.querySelector(`[data-held-card="${CSS.escape(sid)}"]`)
             || document.querySelector(`[data-held="${CSS.escape(sid)}"]`),
             seat,
-            heldWorldAnchor(sid),
+            state.players[sid]?.is_bot ? heldWorldAnchor(sid) : null,
         );
         out.boards[sid] = {};
         const len = state.players[sid]?.board?.length || 4;
         for (let i = 0; i < len; i++) {
+            const trayCard = document.querySelector(
+                `[data-ability-owner="${CSS.escape(sid)}"][data-ability-index="${i}"]`,
+            );
             out.boards[sid][i] = rect(
-                document.querySelector(`.board-card[data-owner="${CSS.escape(sid)}"][data-index="${i}"]`),
+                trayCard
+                || document.querySelector(`.board-card[data-owner="${CSS.escape(sid)}"][data-index="${i}"]`),
                 seat,
-                boardWorldAnchor(sid, i),
+                trayCard ? null : boardWorldAnchor(sid, i),
             );
         }
         const frame = seatWorldFrame(sid);
@@ -1596,7 +2059,33 @@ function captureFullAnchors() {
     return captureAnchors();
 }
 
-function flyCardOnPlane({ from, to, html, className = "", duration = ANIM_MS }) {
+function finishFlyingCard(el, lingerMs, statusText, resolve) {
+    if (statusText) {
+        const status = document.createElement("span");
+        status.className = "flight-status";
+        status.textContent = statusText;
+        el.appendChild(status);
+    }
+    if (lingerMs > 0) {
+        setTimeout(() => {
+            el.remove();
+            resolve();
+        }, lingerMs);
+        return;
+    }
+    el.remove();
+    resolve();
+}
+
+function flyCardOnPlane({
+    from,
+    to,
+    html,
+    className = "",
+    duration = ANIM_MS,
+    lingerMs = 0,
+    statusText = "",
+}) {
     return new Promise((resolve) => {
         const surface = document.querySelector(".table-surface");
         const table3d = document.querySelector(".table-3d");
@@ -1630,17 +2119,32 @@ function flyCardOnPlane({ from, to, html, className = "", duration = ANIM_MS }) 
             if (t < 1) {
                 requestAnimationFrame(frame);
             } else {
-                el.remove();
-                resolve();
+                finishFlyingCard(el, lingerMs, statusText, resolve);
             }
         }
         requestAnimationFrame(frame);
     });
 }
 
-function flyCard({ from, to, html, className = "", duration = ANIM_MS }) {
+function flyCard({
+    from,
+    to,
+    html,
+    className = "",
+    duration = ANIM_MS,
+    lingerMs = 0,
+    statusText = "",
+}) {
     if (from?.world && to?.world) {
-        return flyCardOnPlane({ from, to, html, className, duration });
+        return flyCardOnPlane({
+            from,
+            to,
+            html,
+            className,
+            duration,
+            lingerMs,
+            statusText,
+        });
     }
     return new Promise((resolve) => {
         if (!els.flyLayer || !from || !to) {
@@ -1691,8 +2195,7 @@ function flyCard({ from, to, html, className = "", duration = ANIM_MS }) {
             if (t < 1) {
                 requestAnimationFrame(frame);
             } else {
-                el.remove();
-                resolve();
+                finishFlyingCard(el, lingerMs, statusText, resolve);
             }
         }
         requestAnimationFrame(frame);
@@ -1737,7 +2240,7 @@ function destBoard(sid, index, afterAnchors) {
 
 async function playActionAnimation(action, beforeAnchors) {
     animating = true;
-    const safety = setTimeout(() => { animating = false; }, Math.max(ANIM_MS, 2000) + 500);
+    const safety = setTimeout(() => { animating = false; }, 6000);
     const after = captureFullAnchors();
     const before = beforeAnchors || {};
     const srcDraw = before.draw || after.draw;
@@ -1797,19 +2300,74 @@ async function playActionAnimation(action, beforeAnchors) {
                 duration: CENTER_ANIM_MS,
             });
         } else if (action.type === "burn_fail") {
-            // Missed burn stays face-up on the board so everyone can see it.
-            await wait(1800);
+            const attemptedFrom = before.boards?.[action.owner_sid]?.[action.index]
+                || destBoard(action.owner_sid, action.index, after);
+            const discardTarget = after.discard || srcDiscard;
+            const returnTarget = destBoard(action.owner_sid, action.index, after);
+            await flyCard({
+                from: attemptedFrom,
+                to: discardTarget,
+                html: faceUpHtml(action.card),
+                className: "failed-burn-flight",
+                duration: CENTER_ANIM_MS,
+                lingerMs: 850,
+                statusText: "Failed Burn",
+            });
+            await flyCard({
+                from: discardTarget,
+                to: returnTarget,
+                html: faceUpHtml(action.card),
+                className: "failed-burn-return",
+                duration: SWITCH_ANIM_MS,
+            });
+            if (action.penalty) {
+                const penaltyTarget = destBoard(action.sid, action.penalty.index, after);
+                await flyCard({
+                    from: srcDraw,
+                    to: penaltyTarget,
+                    html: faceDownHtml(),
+                    className: "penalty-card-flight",
+                    duration: PICKUP_ANIM_MS,
+                });
+            }
+        } else if (action.type === "burn_give") {
+            const from = before.boards?.[action.sid]?.[action.give_index]
+                || destBoard(action.sid, action.give_index, before);
+            const to = destBoard(action.target_sid, action.target_index, after);
+            await flyCard({
+                from,
+                to,
+                html: faceDownHtml(),
+                className: "burn-give-flight",
+                duration: SWITCH_ANIM_MS,
+            });
         } else if (action.type === "switch") {
             const a = action.a;
             const b = action.b;
             if (a && b) {
-                const fromA = destBoard(a.owner_sid, a.index, after);
-                const fromB = destBoard(b.owner_sid, b.index, after);
+                const fromA = before.boards?.[a.owner_sid]?.[a.index]
+                    || destBoard(a.owner_sid, a.index, after);
+                const fromB = before.boards?.[b.owner_sid]?.[b.index]
+                    || destBoard(b.owner_sid, b.index, after);
+                const toA = destBoard(b.owner_sid, b.index, after);
+                const toB = destBoard(a.owner_sid, a.index, after);
                 await Promise.all([
-                    flyCard({ from: fromA, to: fromB, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
-                    flyCard({ from: fromB, to: fromA, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
+                    flyCard({ from: fromA, to: toA, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
+                    flyCard({ from: fromB, to: toB, html: faceDownHtml(), duration: SWITCH_ANIM_MS }),
                 ]);
             }
+        } else if (action.type === "ability_put_back") {
+            await Promise.all((action.cards || []).map((item) => {
+                const from = before.boards?.[item.owner_sid]?.[item.index]
+                    || destBoard(item.owner_sid, item.index, after);
+                const to = destBoard(item.owner_sid, item.index, after);
+                return flyCard({
+                    from,
+                    to,
+                    html: faceDownHtml(),
+                    duration: SWITCH_ANIM_MS,
+                });
+            }));
         } else if (action.type === "peek") {
             const from = destBoard(action.owner_sid, action.index, after);
             const to = destHeld(action.sid, after);
