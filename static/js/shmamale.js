@@ -34,6 +34,8 @@ let tableCameraCache = null;
 let seatLayoutCache = { key: "", positions: [] };
 let chatMessages = [];
 let chatUnread = 0;
+let localBurnAttempt = null;
+let localBurnAttemptTimer = null;
 let keyboardNav = {
     ownerSid: "",
     index: 0,
@@ -118,6 +120,13 @@ async function applyGameState(nextState) {
     prevState = state;
     state = nextState;
     setChatAvailability(true);
+    const hasNewBurnResult = Boolean(
+        nextState.burn_showdown
+        && nextState.burn_showdown.id !== lastBurnShowdownId
+    );
+    if (hasNewBurnResult || action?.type === "burn" || action?.type === "burn_fail") {
+        clearLocalBurnAttempt();
+    }
     normalizeKeyboardFocus();
     if (!canChooseNow()) keyboardNav.menuOpen = false;
     finalCountdownEndsAt = Number.isFinite(nextState.final_countdown_ends_at)
@@ -140,6 +149,12 @@ async function applyGameState(nextState) {
         if (action.type === "burn_fail") {
             const who = nextState.players[action.sid]?.username || "A player";
             showToast(`${who} failed a burn and drew a penalty card.`);
+        }
+        if (action.type === "burn") {
+            const who = nextState.players[action.sid]?.username || "A player";
+            const owner = nextState.players[action.owner_sid]?.username || "a player";
+            const target = action.owner_sid === action.sid ? "their own card" : `${owner}'s card`;
+            showToast(`${who} burned ${target}.`);
         }
         render({ hideAnimTargets: true, action });
         await playActionAnimation(action, anchors);
@@ -167,6 +182,11 @@ socket.on("chat_message", (message) => {
         chatUnread += 1;
     }
     renderChat();
+});
+
+socket.on("burn_attempt_registered", (data) => {
+    markLocalBurnAttempt(data?.owner_sid, Number(data?.index), Number(data?.contest_window_ms));
+    showToast("Burn attempt registered — waiting for the server showdown…");
 });
 
 function updateSwapMark(action, nextState) {
@@ -2068,6 +2088,36 @@ function isBurnBlocked(ownerSid, index) {
     return (state.burn_blockers || []).some((s) => s.owner_sid === ownerSid && s.index === index);
 }
 
+function markLocalBurnAttempt(ownerSid, index, windowMs) {
+    if (!ownerSid || !Number.isFinite(index)) return;
+    localBurnAttempt = { owner_sid: ownerSid, index };
+    document.querySelector(
+        `.board-card[data-owner="${CSS.escape(ownerSid)}"][data-index="${index}"]`,
+    )?.classList.add("burn-attempt-pending");
+    if (localBurnAttemptTimer) window.clearTimeout(localBurnAttemptTimer);
+    localBurnAttemptTimer = window.setTimeout(
+        clearLocalBurnAttempt,
+        Math.max(1200, (Number.isFinite(windowMs) ? windowMs : 850) + 1200),
+    );
+}
+
+function clearLocalBurnAttempt() {
+    localBurnAttempt = null;
+    if (localBurnAttemptTimer) window.clearTimeout(localBurnAttemptTimer);
+    localBurnAttemptTimer = null;
+    document.querySelectorAll(".board-card.burn-attempt-pending").forEach((card) => {
+        card.classList.remove("burn-attempt-pending");
+    });
+}
+
+function isKingTargeted(ownerSid, index) {
+    const ability = state.pending_ability;
+    if (!ability || ability.type !== "switch_peek") return false;
+    return (ability.targets || []).some((item) => (
+        item.owner_sid === ownerSid && item.index === index
+    ));
+}
+
 function renderBoardCard(ownerSid, index, slot, options = {}) {
     if (slot.empty) {
         const holdingPeekHere = state.held_peek
@@ -2080,6 +2130,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     }
 
     const selected = isSelectedByAbility(ownerSid, index);
+    const kingTargeted = isKingTargeted(ownerSid, index);
     const burnt = isBurntSlot(ownerSid, index);
     const highlight = shouldHighlightSlot(ownerSid, index);
     const opening = canOpeningPeek(ownerSid, index, slot);
@@ -2089,6 +2140,12 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     const classes = ["board-card", slot.faceUp ? "face-up" : "face-down"];
     if (slot.faceUp && slot.card) classes.push(colorClass(slot.card));
     if (selected) classes.push("selected");
+    if (kingTargeted) classes.push("king-targeted");
+    if (
+        localBurnAttempt
+        && localBurnAttempt.owner_sid === ownerSid
+        && localBurnAttempt.index === index
+    ) classes.push("burn-attempt-pending");
     if (
         selected
         && !state.pending_burn
@@ -2468,6 +2525,12 @@ function spectatorAbilityNote() {
     if (!ability || ability.sid === mySid) return "";
     const who = state.players[ability.sid]?.username || "Someone";
     const label = ability.label || "a special";
+    const kingTargets = ability.targets?.length || 0;
+    if (
+        ability.type === "switch_peek" && kingTargets
+    ) {
+        return `${who}'s King targeted ${kingTargets} of 2 cards — red marks the selections…`;
+    }
     if (ability.stage === "holding") {
         return `${who} is resolving ${label}…`;
     }
@@ -2659,28 +2722,45 @@ function burnShowdownHtml(showdown) {
     const rows = attempts.map((attempt, index) => {
         const name = state.players[attempt.sid]?.username || "Player";
         let result = "Attempt";
-        if (attempt.sid === showdown.winner_sid) result = "Burn landed";
-        else if (attempt.result === "late") result = "Too late · penalty";
-        else if (attempt.result === "miss") result = "Missed · penalty";
-        const seconds = (Math.max(0, attempt.time_ms) / 1000).toFixed(2);
+        if (attempt.sid === showdown.winner_sid) result = "First valid burn";
+        else if (attempt.result === "late") result = "Late burn · penalty card";
+        else if (attempt.result === "miss") result = "Wrong burn · penalty card";
+        else if (attempt.result === "cancelled") result = "Attempt cancelled";
+        const delta = Number(attempt.delta_ms) || 0;
+        const deltaLabel = `${delta > 0 ? "+" : ""}${delta}ms`;
         return `
             <div class="burn-showdown-row ${attempt.sid === showdown.winner_sid ? "winner" : "loser"}" style="--race-order:${index}">
                 <span class="burn-showdown-place">${index + 1}</span>
                 <span class="burn-showdown-player"><strong>${escapeHtml(name)}</strong><small>${result}</small></span>
-                <b>${seconds}s</b>
+                <b>${escapeHtml(deltaLabel)}</b>
             </div>
         `;
     }).join("");
     const card = showdown.discard_card?.label || "discard";
     const winnerAttempt = attempts.find((attempt) => attempt.sid === showdown.winner_sid);
-    const winnerName = state.players[showdown.winner_sid]?.username || "Player";
+    const winnerName = showdown.winner_sid
+        ? state.players[showdown.winner_sid]?.username || "Player"
+        : "";
+    const target = showdown.winner_target || {};
+    const ownerName = state.players[target.owner_sid]?.username || "a player";
+    const targetLabel = target.card?.label || "card";
+    const targetText = target.owner_sid === showdown.winner_sid
+        ? `their own ${targetLabel}`
+        : `${ownerName}'s ${targetLabel}`;
     const winningSeconds = (Math.max(0, winnerAttempt?.time_ms || 0) / 1000).toFixed(2);
+    const isRace = attempts.length > 1;
+    const heading = showdown.winner_sid
+        ? `<h2><span>${escapeHtml(winnerName)}</span> burned ${escapeHtml(targetText)}</h2>`
+        : "<h2>No burn landed</h2>";
+    const reaction = showdown.winner_sid
+        ? `<div class="burn-winning-time">${winningSeconds}s<small>SERVER REACTION</small></div>`
+        : "";
     return `
         <div class="burn-showdown-card">
-            <div class="burn-impact" aria-hidden="true">BURN!</div>
-            <div class="burn-showdown-kicker">REACTION SHOWDOWN · ${escapeHtml(card)}</div>
-            <h2><span>${escapeHtml(winnerName)}</span> struck first</h2>
-            <div class="burn-winning-time">${winningSeconds}<small>SECONDS</small></div>
+            <div class="burn-impact" aria-hidden="true">${isRace ? "SHOWDOWN!" : "BURN!"}</div>
+            <div class="burn-showdown-kicker">${isRace ? "SERVER BURN SHOWDOWN" : "BURN CONFIRMED"} · ${escapeHtml(card)}</div>
+            ${heading}
+            ${reaction}
             <div class="burn-showdown-list">${rows}</div>
         </div>
     `;
@@ -2701,7 +2781,7 @@ function renderBurnShowdown() {
     if (burnShowdownTimer) window.clearTimeout(burnShowdownTimer);
     burnShowdownTimer = window.setTimeout(() => {
         els.burnShowdown.classList.add("hidden");
-    }, 6000);
+    }, (showdown.attempts || []).length > 1 ? 6500 : 4500);
 }
 
 function captureAnchors() {

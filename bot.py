@@ -470,6 +470,9 @@ def bot_action_key(game):
                 pending_burn["target_card_id"],
             )
 
+    if game.get("active_burn_contest_id"):
+        return None
+
     if game["status"] != "playing":
         return None
     sid = current_sid(game)
@@ -528,6 +531,8 @@ def run_bot_work(room, key):
     if not game or game.get("bot_scheduled_key") != key:
         return
     game["bot_scheduled_key"] = None
+    if game.get("active_burn_contest_id"):
+        return
     if key[0] == "burn_give":
         perform_bot_burn_give(game, sid)
     elif key[0] == "choose":
@@ -596,7 +601,6 @@ def run_bot_burn(room, discard_card_id, candidate, delay):
         (candidate["sid"], discard_card_id)
     )
     perform_bot_burn(game, candidate, discard_card_id, time.time())
-    mp.emit_state(room)
 
 
 def choose_bot_burn_candidate(game, top_card, bot_sid=None):
@@ -680,6 +684,7 @@ def perform_bot_burn(game, candidate, discard_card_id=None, attempted_at=None):
         attempted_at,
     )
     record_bot_event(game, sid, "burn", outcome=outcome, own=owner_sid == sid)
+    return outcome
 
 
 def perform_bot_burn_give(game, sid):

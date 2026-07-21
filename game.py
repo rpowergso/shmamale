@@ -239,6 +239,7 @@ def new_room(host_sid):
         "burn_window_started_at": None,
         "burn_window_card_id": None,
         "burn_contests": {},
+        "active_burn_contest_id": None,
         "burn_showdown": None,
         "burn_showdown_sequence": 0,
         "burn_locked_discard_ids": set(),
@@ -299,6 +300,7 @@ def slot_key(owner_sid, index):
 
 def reset_discard_burn_state(game):
     game["discard_epoch"] = game.get("discard_epoch", 0) + 1
+    game["active_burn_contest_id"] = None
     game["burnt_slots"] = []
     game["burn_blockers"] = []
     game["bot_burn_checked"] = set()

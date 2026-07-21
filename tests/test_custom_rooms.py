@@ -106,6 +106,25 @@ class CustomGridTests(unittest.TestCase):
         no_peek_view = player_view(game, "a")
         self.assertFalse(no_peek_view["players"]["a"]["opening_peekable"])
 
+    def test_black_king_targets_are_public_without_revealing_cards(self):
+        game = self.make_game()
+        game["phase"] = "ability"
+        game["players"]["b"]["board"][0] = make_slot(card("K", "hearts"))
+        game["pending_ability"] = {
+            "sid": "a",
+            "type": "switch_peek",
+            "stage": "selecting",
+            "selected": [{"owner_sid": "b", "index": 0}],
+            "inspected": [{"owner_sid": "b", "index": 0}],
+            "inspection_count": 1,
+        }
+
+        spectator_view = player_view(game, "c")
+        ability = spectator_view["pending_ability"]
+        self.assertEqual(ability["targets"], [{"owner_sid": "b", "index": 0}])
+        self.assertEqual(ability["selected"], [])
+        self.assertIsNone(spectator_view["players"]["b"]["board"][0]["card"])
+
 
 class WinConditionTests(unittest.TestCase):
     def make_scoring_game(self, condition):
@@ -504,6 +523,12 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"compactLandscape ? measuredHeight", game_js)
         self.assertIn(b'socket.emit("send_chat"', game_js)
         self.assertIn(b"escapeHtml(message.message", game_js)
+        self.assertIn(b'"burn_attempt_registered"', game_js)
+        self.assertIn(b"king-targeted", game_js)
+        self.assertIn(b"delta_ms", game_js)
+
+        self.assertIn(b".board-card.king-targeted", css)
+        self.assertIn(b".board-card.burn-attempt-pending", css)
 
         with app.open_resource("railway.json") as railway_file:
             railway_config = json.load(railway_file)

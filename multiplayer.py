@@ -1,4 +1,5 @@
 from copy import deepcopy
+import threading
 import time
 
 from flask import request
@@ -57,6 +58,7 @@ from game import (
 
 rooms = {}
 FINAL_COUNTDOWN_SECONDS = 3.0
+BURN_CONTEST_SECONDS = 0.85
 MAX_PLAYERS = 6
 LOBBY_RECONNECT_GRACE_SECONDS = 60
 MAX_CHAT_MESSAGES = 100
@@ -280,6 +282,9 @@ def player_view(game, viewer_sid):
             "label": ability_label(ability["type"]),
             "stage": ability["stage"],
             "selected": deepcopy(ability.get("selected", [])) if ability["sid"] == viewer_sid else [],
+            "targets": deepcopy(
+                ability.get("inspected", ability.get("selected", []))
+            ) if ability.get("type") == "switch_peek" else [],
         }
         if ability["sid"] == viewer_sid:
             pending_ability["inspection_count"] = ability.get(
@@ -373,6 +378,7 @@ def final_countdown_pending(game):
         or game.get("pending_ability")
         or game.get("pending_burn")
         or game.get("held_peek")
+        or game.get("active_burn_contest_id")
     )
 
 
@@ -467,6 +473,7 @@ def start_round(game):
     game["burn_window_started_at"] = None
     game["burn_window_card_id"] = None
     game["burn_contests"] = {}
+    game["active_burn_contest_id"] = None
     game["burn_showdown"] = None
     game["burn_locked_discard_ids"] = set()
     game["burnt_slots"] = []
@@ -693,6 +700,9 @@ def ensure_no_pending_burn(game):
     if game.get("pending_burn"):
         emit_error("Finish the burn first.")
         return False
+    if game.get("active_burn_contest_id"):
+        emit_error("A burn showdown is being decided.")
+        return False
     return True
 
 
@@ -794,6 +804,9 @@ def record_switch_peek_give(game, actor_sid, give_index, given_card):
 def resolve_unseen_switch(room, actor_sid, selected):
     socketio.sleep(0.8)
     game = rooms.get(room)
+    while game and game.get("active_burn_contest_id"):
+        socketio.sleep(0.05)
+        game = rooms.get(room)
     if not game:
         return
     actor_sid = apply_sid_redirects(actor_sid)
@@ -934,6 +947,10 @@ def burn_contest_for(game, discard_card_id, discard_card=None, attempted_at=None
         "discard_card_id": discard_card_id,
         "discard_card": discard_card,
         "started_at": started_at,
+        "opened_at": attempted_at,
+        "resolve_at": attempted_at + BURN_CONTEST_SECONDS,
+        "resolution_scheduled": False,
+        "resolved": False,
         "attempts": [],
         "winner_sid": None,
         "winner_target": None,
@@ -946,12 +963,34 @@ def burn_contest_for(game, discard_card_id, discard_card=None, attempted_at=None
     return contest
 
 
-def register_burn_attempt(game, contest, sid, attempted_at):
+def burn_lock_for(game):
+    lock = game.get("_burn_contest_lock")
+    if lock is None:
+        lock = threading.RLock()
+        game["_burn_contest_lock"] = lock
+    return lock
+
+
+def register_burn_attempt(
+    game,
+    contest,
+    sid,
+    owner_sid,
+    index,
+    target_card,
+    attempted_at,
+    inspection_burn=False,
+):
     if any(attempt["sid"] == sid for attempt in contest["attempts"]):
         return None
     elapsed_ms = max(0, int(round((attempted_at - contest["started_at"]) * 1000)))
     attempt = {
         "sid": sid,
+        "owner_sid": owner_sid,
+        "index": index,
+        "target_card": target_card,
+        "matches": burn_matches(contest["discard_card"], target_card),
+        "inspection_burn": bool(inspection_burn),
         "time_ms": elapsed_ms,
         "result": "pending",
         "penalty": False,
@@ -961,15 +1000,167 @@ def register_burn_attempt(game, contest, sid, attempted_at):
 
 
 def publish_burn_showdown(game, contest):
-    if not contest.get("winner_sid") or len(contest["attempts"]) < 2:
+    if not contest.get("attempts"):
         return
+    attempts = sorted(contest["attempts"], key=lambda item: item["time_ms"])
+    baseline = next(
+        (
+            attempt["time_ms"]
+            for attempt in attempts
+            if attempt["sid"] == contest.get("winner_sid")
+        ),
+        attempts[0]["time_ms"],
+    )
+    public_attempts = [
+        {
+            "sid": attempt["sid"],
+            "owner_sid": attempt["owner_sid"],
+            "index": attempt["index"],
+            "time_ms": attempt["time_ms"],
+            "delta_ms": attempt["time_ms"] - baseline,
+            "result": attempt["result"],
+            "penalty": attempt["penalty"],
+        }
+        for attempt in attempts
+    ]
     game["burn_showdown_sequence"] = game.get("burn_showdown_sequence", 0) + 1
     game["burn_showdown"] = {
         "id": game["burn_showdown_sequence"],
         "discard_card": public_card(contest["discard_card"]),
         "winner_sid": contest["winner_sid"],
-        "attempts": deepcopy(contest["attempts"]),
+        "winner_target": deepcopy(contest.get("winner_target")),
+        "contest_window_ms": int(round(BURN_CONTEST_SECONDS * 1000)),
+        "attempts": public_attempts,
     }
+
+
+def burn_attempt_is_eligible(game, attempt):
+    player = game["players"].get(attempt["sid"])
+    if not player or player.get("eliminated") or player.get("called"):
+        return False
+    pending_draw = game.get("pending_draw")
+    if pending_draw and pending_draw.get("sid") == attempt["sid"]:
+        return False
+    slot = slot_at(game, attempt["owner_sid"], attempt["index"])
+    if not slot or not slot.get("card"):
+        return False
+    if slot["card"]["id"] != attempt["target_card"]["id"]:
+        return False
+    if is_slot_burnt(game, attempt["owner_sid"], attempt["index"]):
+        return False
+    if is_burn_blocked(
+        game,
+        attempt["owner_sid"],
+        attempt["index"],
+        attempt["target_card"]["id"],
+    ):
+        return False
+    return not (
+        attempt["owner_sid"] != attempt["sid"]
+        and card_count(player["board"]) == 0
+    )
+
+
+def finalize_burn_contest(game, discard_card_id):
+    with burn_lock_for(game):
+        return finalize_burn_contest_locked(game, discard_card_id)
+
+
+def finalize_burn_contest_locked(game, discard_card_id):
+    contest = game.get("burn_contests", {}).get(discard_card_id)
+    if not contest or contest.get("resolved"):
+        return False
+    contest["resolved"] = True
+    attempts = sorted(contest["attempts"], key=lambda item: item["time_ms"])
+    current_top = game["discard_pile"][-1] if game.get("discard_pile") else None
+    discard_still_live = bool(
+        current_top
+        and current_top["id"] == discard_card_id
+        and not is_discard_burn_locked(game, current_top)
+        and not game.get("pending_burn")
+    )
+    winner = next(
+        (
+            attempt
+            for attempt in attempts
+            if discard_still_live
+            and attempt["matches"]
+            and burn_attempt_is_eligible(game, attempt)
+        ),
+        None,
+    )
+
+    for attempt in attempts:
+        if attempt is winner:
+            continue
+        if not discard_still_live or not burn_attempt_is_eligible(game, attempt):
+            attempt["result"] = "cancelled"
+            continue
+        reason = "race_lost" if winner and attempt["matches"] else "rank"
+        apply_failed_burn(
+            game,
+            attempt["sid"],
+            attempt["owner_sid"],
+            attempt["index"],
+            attempt["target_card"],
+            reason,
+        )
+        attempt["result"] = "late" if winner and attempt["matches"] else "miss"
+        attempt["penalty"] = True
+
+    if winner:
+        if winner["owner_sid"] == winner["sid"]:
+            apply_successful_own_burn(
+                game,
+                winner["sid"],
+                winner["owner_sid"],
+                winner["index"],
+                winner["target_card"],
+            )
+        else:
+            ok, _ = apply_successful_opponent_burn(
+                game,
+                winner["sid"],
+                winner["owner_sid"],
+                winner["index"],
+                winner["target_card"],
+            )
+            if not ok:
+                winner = None
+        if winner:
+            winner["result"] = "winner"
+            contest["winner_sid"] = winner["sid"]
+            contest["winner_target"] = {
+                "owner_sid": winner["owner_sid"],
+                "index": winner["index"],
+                "card": public_card(winner["target_card"]),
+            }
+            if winner.get("inspection_burn"):
+                record_switch_peek_burn(
+                    game,
+                    winner["sid"],
+                    winner["owner_sid"],
+                    winner["index"],
+                    winner["target_card"],
+                )
+
+    game["active_burn_contest_id"] = None
+    publish_burn_showdown(game, contest)
+    refresh_final_countdown(game)
+    return True
+
+
+def run_burn_contest_resolution(room, discard_card_id):
+    game = rooms.get(room)
+    contest = game.get("burn_contests", {}).get(discard_card_id) if game else None
+    if not contest:
+        return
+    socketio.sleep(max(0, contest["resolve_at"] - time.time()))
+    game = rooms.get(room)
+    if not game:
+        return
+    if finalize_burn_contest(game, discard_card_id):
+        emit_state(room)
 
 
 def resolve_burn_attempt(
@@ -979,8 +1170,30 @@ def resolve_burn_attempt(
     index,
     discard_card_id=None,
     attempted_at=None,
+    inspection_burn=False,
 ):
-    """Resolve normal and near-simultaneous burn attempts against one discard."""
+    with burn_lock_for(game):
+        return resolve_burn_attempt_locked(
+            game,
+            burner_sid,
+            owner_sid,
+            index,
+            discard_card_id,
+            attempted_at,
+            inspection_burn,
+        )
+
+
+def resolve_burn_attempt_locked(
+    game,
+    burner_sid,
+    owner_sid,
+    index,
+    discard_card_id=None,
+    attempted_at=None,
+    inspection_burn=False,
+):
+    """Register a burn using the server clock; mutate only after the contest window."""
     attempted_at = attempted_at if attempted_at is not None else time.time()
     if game.get("status") != "playing":
         return "error", None, "The round is not active."
@@ -1005,9 +1218,16 @@ def resolve_burn_attempt(
         and not is_discard_burn_locked(game, current_top)
         and not game.get("pending_burn")
     )
-    race_attempt = bool(contest and contest.get("winner_sid"))
-    if not normal_attempt and not race_attempt:
+    if contest and contest.get("resolved") and normal_attempt:
+        game["burn_contests"].pop(discard_card_id, None)
+        contest = None
+    if not normal_attempt:
         return "error", None, "That discard is no longer available to burn."
+    if contest and attempted_at > contest["resolve_at"]:
+        return "error", None, "The burn showdown window has closed."
+    active_contest_id = game.get("active_burn_contest_id")
+    if active_contest_id and active_contest_id != discard_card_id:
+        return "error", None, "Another burn showdown is being decided."
 
     if contest is None:
         contest = burn_contest_for(
@@ -1018,10 +1238,6 @@ def resolve_burn_attempt(
         )
     slot = slot_at(game, owner_sid, index)
     target_card = slot.get("card") if slot else None
-    if not target_card and race_attempt:
-        winner_target = contest.get("winner_target") or {}
-        if winner_target.get("owner_sid") == owner_sid and winner_target.get("index") == index:
-            target_card = winner_target.get("card")
     if not target_card:
         return "error", None, "That burn target changed."
     if is_burn_blocked(game, owner_sid, index, target_card["id"]):
@@ -1029,57 +1245,33 @@ def resolve_burn_attempt(
     if owner_sid != burner_sid and card_count(player["board"]) == 0:
         return "error", target_card, "You need one of your own cards to give them."
 
-    attempt = register_burn_attempt(game, contest, burner_sid, attempted_at)
+    attempt = register_burn_attempt(
+        game,
+        contest,
+        burner_sid,
+        owner_sid,
+        index,
+        target_card,
+        attempted_at,
+        inspection_burn,
+    )
     if attempt is None:
         return "error", None, "You already attempted this burn."
-
-    discard_card = contest["discard_card"]
-    if slot:
-        slot["revealed"] = True
-
-    matches = burn_matches(discard_card, target_card)
-    if race_attempt:
-        reason = "race_lost" if matches else "rank"
-        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, reason)
-        attempt["result"] = "late" if matches else "miss"
-        attempt["penalty"] = True
-        publish_burn_showdown(game, contest)
-        return "race_lost", target_card, None
-
-    if is_slot_burnt(game, owner_sid, index):
-        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, "already_burnt")
-        attempt["result"] = "miss"
-        attempt["penalty"] = True
-        return "failed", target_card, None
-    if not matches:
-        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, "rank")
-        attempt["result"] = "miss"
-        attempt["penalty"] = True
-        return "failed", target_card, None
-
-    if owner_sid == burner_sid:
-        apply_successful_own_burn(game, burner_sid, owner_sid, index, target_card)
-    else:
-        ok, err = apply_successful_opponent_burn(
-            game,
-            burner_sid,
-            owner_sid,
-            index,
-            target_card,
+    game["active_burn_contest_id"] = discard_card_id
+    pause_final_countdown(game)
+    room = game.get("room_id")
+    if (
+        room
+        and rooms.get(room) is game
+        and not contest.get("resolution_scheduled")
+    ):
+        contest["resolution_scheduled"] = True
+        socketio.start_background_task(
+            run_burn_contest_resolution,
+            room,
+            discard_card_id,
         )
-        if not ok:
-            attempt["result"] = "cancelled"
-            return "error", target_card, err
-
-    attempt["result"] = "winner"
-    contest["winner_sid"] = burner_sid
-    contest["winner_target"] = {
-        "owner_sid": owner_sid,
-        "index": index,
-        "card": target_card,
-    }
-    publish_burn_showdown(game, contest)
-    return "success", target_card, None
+    return "pending", target_card, None
 
 
 def put_back_held_peek(game):
@@ -1691,6 +1883,8 @@ def on_ability_put_back(data):
     game = rooms.get(room)
     if not game or game["status"] != "playing":
         return
+    if not ensure_no_pending_burn(game):
+        return
     peek = game.get("held_peek")
     if not peek or peek["sid"] != request.sid:
         emit_error("You are not holding a peeked card.")
@@ -1704,6 +1898,8 @@ def on_burn_from_peek(data):
     room = data["room"].upper()
     game = rooms.get(room)
     if not game or game["status"] != "playing":
+        return
+    if not ensure_no_pending_burn(game):
         return
     peek = game.get("held_peek")
     if not peek or peek["sid"] != request.sid:
@@ -1942,20 +2138,22 @@ def on_burn_card(data):
         owner_sid,
         index,
         data.get("discard_id"),
+        inspection_burn=inspection_burn,
     )
     if outcome == "error":
         emit_error(err)
         emit_state(room)
         return
-    if outcome == "success" and inspection_burn:
-        record_switch_peek_burn(
-            game,
-            request.sid,
-            owner_sid,
-            index,
-            target_card,
+    if outcome == "pending":
+        emit(
+            "burn_attempt_registered",
+            {
+                "owner_sid": owner_sid,
+                "index": index,
+                "contest_window_ms": int(round(BURN_CONTEST_SECONDS * 1000)),
+            },
+            room=request.sid,
         )
-    emit_state(room)
 
 
 @socketio.on("finish_burn_give")

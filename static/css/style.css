@@ -1804,6 +1804,50 @@ input {
     outline-offset: 1px;
 }
 
+.board-card.king-targeted {
+    animation: king-target-pulse 0.85s ease-in-out infinite;
+    box-shadow: 0 0 0 3px #ff3b30, 0 0 22px rgba(255, 59, 48, 0.92);
+    outline: 3px solid #ff8a80;
+    outline-offset: 3px;
+    z-index: 6;
+}
+
+.board-card.king-targeted::after {
+    background: rgba(183, 28, 28, 0.94);
+    border: 1px solid #ffb3ad;
+    border-radius: 4px;
+    color: white;
+    content: "KING";
+    font-size: 0.48rem;
+    font-weight: 1000;
+    left: 50%;
+    letter-spacing: 0.05em;
+    padding: 2px 4px;
+    pointer-events: none;
+    position: absolute;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    z-index: 7;
+}
+
+.board-card.burn-attempt-pending {
+    animation: burn-attempt-pulse 0.48s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 3px #ff8c32, 0 0 24px rgba(255, 92, 32, 0.9);
+    outline: 3px solid #ffd09a;
+    outline-offset: 3px;
+    z-index: 7;
+}
+
+@keyframes king-target-pulse {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.3); }
+}
+
+@keyframes burn-attempt-pulse {
+    from { filter: brightness(1); transform: translateZ(1px) scale(1); }
+    to { filter: brightness(1.34); transform: translateZ(1px) scale(1.055); }
+}
+
 .board-card.ability-picked-up {
     opacity: 0;
     pointer-events: none;
