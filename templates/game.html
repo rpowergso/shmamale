@@ -13,7 +13,12 @@
             <div class="eyebrow">PLAY ROOM</div>
             <h1>WAITING ROOM</h1>
         </div>
-        <div class="room-code">INVITE CODE <strong>{{ room_id }}</strong></div>
+        <div class="lobby-heading-actions">
+            <button type="button" class="btn btn-gray small-btn chat-open-btn" data-chat-toggle aria-controls="room-chat" aria-expanded="false" disabled>
+                CHAT <span class="chat-unread hidden" data-chat-unread>0</span>
+            </button>
+            <div class="room-code">INVITE CODE <strong>{{ room_id }}</strong></div>
+        </div>
     </div>
 
     <div class="lobby-columns">
@@ -145,6 +150,9 @@
             <div id="action-hint" class="action-hint"></div>
         </div>
         <div class="topbar-actions">
+            <button type="button" class="btn btn-gray small-btn chat-open-btn" data-chat-toggle aria-controls="room-chat" aria-expanded="false" disabled>
+                CHAT <span class="chat-unread hidden" data-chat-unread>0</span>
+            </button>
             <button id="keybinds-btn" type="button" class="btn btn-gray small-btn">KEYS</button>
             <div class="room-pill">ROOM {{ room_id }}</div>
         </div>
@@ -204,6 +212,24 @@
         <div id="keyboard-action-menu" class="keyboard-action-menu hidden" role="dialog" aria-label="Choose a turn action"></div>
     </div>
 </main>
+
+<aside id="room-chat" class="chat-panel hidden" aria-label="Room chat">
+    <header class="chat-heading">
+        <div>
+            <span class="eyebrow">ROOM {{ room_id }}</span>
+            <h2>Live chat</h2>
+        </div>
+        <button id="chat-close" type="button" class="btn btn-red small-btn" aria-label="Close chat">CLOSE</button>
+    </header>
+    <div id="chat-messages" class="chat-messages" role="log" aria-live="polite" aria-relevant="additions">
+        <p class="chat-empty">No messages yet.</p>
+    </div>
+    <form id="chat-form" class="chat-form">
+        <label class="sr-only" for="chat-input">Chat message</label>
+        <input id="chat-input" type="text" maxlength="240" autocomplete="off" placeholder="Message the room…" disabled>
+        <button id="chat-send" type="submit" class="btn btn-green small-btn" disabled>SEND</button>
+    </form>
+</aside>
 
 <div id="keybinds-overlay" class="modal-backdrop keybinds-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="keybinds-title">
     <section class="keybinds-card">

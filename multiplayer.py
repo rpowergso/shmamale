@@ -59,6 +59,9 @@ rooms = {}
 FINAL_COUNTDOWN_SECONDS = 3.0
 MAX_PLAYERS = 6
 LOBBY_RECONNECT_GRACE_SECONDS = 60
+MAX_CHAT_MESSAGES = 100
+MAX_CHAT_LENGTH = 240
+CHAT_COOLDOWN_SECONDS = 0.4
 sid_redirects = {}
 
 
@@ -417,6 +420,10 @@ def run_final_countdown(room, token):
 
 def emit_error(message):
     emit("error_message", {"msg": message}, room=request.sid)
+
+
+def chat_history(game):
+    return deepcopy(game.get("chat_messages", []))[-MAX_CHAT_MESSAGES:]
 
 
 def start_round(game):
@@ -1144,7 +1151,7 @@ def on_join(data):
     if not room:
         emit_error("A room code is required.")
         return
-    username = data.get("username", "Anonymous").strip() or "Anonymous"
+    username = str(data.get("username", "Anonymous")).strip()[:32] or "Anonymous"
     reconnect_token = str(data.get("reconnect_token", "")).strip()[:128]
 
     if room not in rooms:
@@ -1179,6 +1186,40 @@ def on_join(data):
 
     join_room(room)
     emit_state(room)
+    emit("chat_history", {"messages": chat_history(game)}, room=request.sid)
+
+
+@socketio.on("send_chat")
+def on_send_chat(data):
+    data = data or {}
+    room = str(data.get("room", "")).upper().strip()
+    game = rooms.get(room)
+    player = game.get("players", {}).get(request.sid) if game else None
+    if not player or is_bot_player(player) or not player.get("connected"):
+        emit_error("Join the room before sending a message.")
+        return
+
+    message = " ".join(str(data.get("message", ""))[:1000].split())
+    if not message:
+        return
+    message = message[:MAX_CHAT_LENGTH]
+
+    now = time.time()
+    if now - float(player.get("last_chat_at", 0.0)) < CHAT_COOLDOWN_SECONDS:
+        emit_error("Please wait a moment before sending another message.")
+        return
+    player["last_chat_at"] = now
+    game["chat_sequence"] = game.get("chat_sequence", 0) + 1
+    chat_message = {
+        "id": game["chat_sequence"],
+        "sender_sid": request.sid,
+        "username": player["username"],
+        "message": message,
+        "sent_at": int(now * 1000),
+    }
+    game.setdefault("chat_messages", []).append(chat_message)
+    game["chat_messages"] = game["chat_messages"][-MAX_CHAT_MESSAGES:]
+    socketio.emit("chat_message", deepcopy(chat_message), room=room)
 
 
 @socketio.on("update_settings")

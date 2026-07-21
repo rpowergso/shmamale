@@ -247,6 +247,8 @@ def new_room(host_sid):
         "failed_burn_reveals": [],
         "action_sequence": 0,
         "last_action": None,
+        "chat_messages": [],
+        "chat_sequence": 0,
     }
 
 
@@ -277,6 +279,7 @@ def make_player(username, is_bot=False, difficulty=None, bot_policy=None):
         "eliminated": False,
         "spectating": False,
         "eliminated_round": None,
+        "last_chat_at": 0.0,
     }
 
 

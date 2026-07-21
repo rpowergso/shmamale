@@ -320,6 +320,63 @@ class UnifiedLobbySocketTests(unittest.TestCase):
             friend.disconnect()
 
 
+class LiveChatSocketTests(unittest.TestCase):
+    def tearDown(self):
+        rooms.pop("CHAT", None)
+
+    def test_room_chat_broadcasts_persists_and_rate_limits(self):
+        host = socketio.test_client(app)
+        friend = socketio.test_client(app)
+        late_joiner = None
+        try:
+            host.emit("join", {"room": "CHAT", "username": "Host"})
+            friend.emit("join", {"room": "CHAT", "username": "Friend"})
+            host.get_received()
+            friend.get_received()
+
+            host.emit("send_chat", {"room": "CHAT", "message": "  hello   everyone  "})
+            host_messages = [
+                packet["args"][0]
+                for packet in host.get_received()
+                if packet["name"] == "chat_message"
+            ]
+            friend_messages = [
+                packet["args"][0]
+                for packet in friend.get_received()
+                if packet["name"] == "chat_message"
+            ]
+            self.assertEqual(host_messages[-1]["message"], "hello everyone")
+            self.assertEqual(friend_messages[-1]["username"], "Host")
+
+            host.emit("send_chat", {"room": "CHAT", "message": "too fast"})
+            errors = [
+                packet["args"][0]["msg"]
+                for packet in host.get_received()
+                if packet["name"] == "error_message"
+            ]
+            self.assertTrue(any("wait a moment" in message for message in errors))
+
+            friend.emit("send_chat", {"room": "CHAT", "message": "x" * 300})
+            self.assertEqual(len(rooms["CHAT"]["chat_messages"][-1]["message"]), 240)
+
+            late_joiner = socketio.test_client(app)
+            late_joiner.emit("join", {"room": "CHAT", "username": "Late"})
+            histories = [
+                packet["args"][0]["messages"]
+                for packet in late_joiner.get_received()
+                if packet["name"] == "chat_history"
+            ]
+            self.assertEqual([item["message"] for item in histories[-1]], [
+                "hello everyone",
+                "x" * 240,
+            ])
+        finally:
+            host.disconnect()
+            friend.disconnect()
+            if late_joiner and late_joiner.is_connected():
+                late_joiner.disconnect()
+
+
 class SocketReconnectTests(unittest.TestCase):
     def tearDown(self):
         rooms.pop("REJOIN", None)
@@ -424,6 +481,8 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b'id="setting-deck-count"', room.data)
         self.assertIn(b'id="keybinds-overlay"', room.data)
         self.assertIn(b'id="keyboard-action-menu"', room.data)
+        self.assertIn(b'id="room-chat"', room.data)
+        self.assertIn(b'id="chat-form"', room.data)
         self.assertIn(b"Rotate sideways for the best table view", room.data)
         self.assertIn(b"INVITE CODE", room.data)
 
@@ -441,6 +500,10 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b'event.code === "Space"', game_js)
         self.assertIn(b'event.key === "Enter"', game_js)
         self.assertIn(b'"(pointer: coarse)"', game_js)
+        self.assertIn(b'window.visualViewport?.addEventListener("resize"', game_js)
+        self.assertIn(b"compactLandscape ? measuredHeight", game_js)
+        self.assertIn(b'socket.emit("send_chat"', game_js)
+        self.assertIn(b"escapeHtml(message.message", game_js)
 
         with app.open_resource("railway.json") as railway_file:
             railway_config = json.load(railway_file)

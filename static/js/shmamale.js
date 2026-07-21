@@ -32,6 +32,8 @@ let burnShowdownTimer = null;
 let activeGridPeekMode = "self";
 let tableCameraCache = null;
 let seatLayoutCache = { key: "", positions: [] };
+let chatMessages = [];
+let chatUnread = 0;
 let keyboardNav = {
     ownerSid: "",
     index: 0,
@@ -43,25 +45,38 @@ const reconnectToken = loadReconnectToken();
 
 const els = {};
 
+function syncAppViewportHeight() {
+    const height = window.visualViewport?.height || window.innerHeight;
+    if (height > 0) {
+        document.documentElement.style.setProperty("--app-height", `${Math.round(height)}px`);
+    }
+}
+
 if (typeof io === "undefined") {
     setConnBanner("Game client failed to load (socket.io missing). Please refresh the page.", false);
 }
 
 document.addEventListener("DOMContentLoaded", () => {
+    syncAppViewportHeight();
     cacheEls();
     bindStaticEvents();
     bindCardPointerFallback();
     applyTableCameraSettings();
     initializeGameMode();
     window.setInterval(updateCountdownText, 100);
-    window.addEventListener("resize", () => {
-        if (!state) return;
+    const handleViewportChange = () => {
+        syncAppViewportHeight();
         applyTableCameraSettings(true);
+        if (!state) return;
         if (els.seats && state.players) renderSeats();
         else if (els.seats) layoutNameplates(rotatedOrder());
         layoutArLabels();
         layoutAbilityTray();
-    });
+    };
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("orientationchange", handleViewportChange);
+    window.visualViewport?.addEventListener("resize", handleViewportChange);
+    window.visualViewport?.addEventListener("scroll", handleViewportChange);
 });
 
 socket.on("connect", () => {
@@ -102,6 +117,7 @@ async function applyGameState(nextState) {
 
     prevState = state;
     state = nextState;
+    setChatAvailability(true);
     normalizeKeyboardFocus();
     if (!canChooseNow()) keyboardNav.menuOpen = false;
     finalCountdownEndsAt = Number.isFinite(nextState.final_countdown_ends_at)
@@ -135,6 +151,22 @@ async function applyGameState(nextState) {
 
 socket.on("error_message", (data) => {
     showToast(data.msg || "Something went wrong.");
+});
+
+socket.on("chat_history", (data) => {
+    chatMessages = Array.isArray(data?.messages) ? data.messages.slice(-100) : [];
+    chatUnread = 0;
+    renderChat();
+});
+
+socket.on("chat_message", (message) => {
+    if (!message || chatMessages.some((item) => item.id === message.id)) return;
+    chatMessages.push(message);
+    chatMessages = chatMessages.slice(-100);
+    if (els.chatPanel?.classList.contains("hidden") && message.sender_sid !== mySid) {
+        chatUnread += 1;
+    }
+    renderChat();
 });
 
 function updateSwapMark(action, nextState) {
@@ -207,6 +239,14 @@ function cacheEls() {
     els.keybindsBtn = document.getElementById("keybinds-btn");
     els.keybindsOverlay = document.getElementById("keybinds-overlay");
     els.keybindsClose = document.getElementById("keybinds-close");
+    els.chatToggles = [...document.querySelectorAll("[data-chat-toggle]")];
+    els.chatUnread = [...document.querySelectorAll("[data-chat-unread]")];
+    els.chatPanel = document.getElementById("room-chat");
+    els.chatClose = document.getElementById("chat-close");
+    els.chatMessages = document.getElementById("chat-messages");
+    els.chatForm = document.getElementById("chat-form");
+    els.chatInput = document.getElementById("chat-input");
+    els.chatSend = document.getElementById("chat-send");
 }
 
 function bindStaticEvents() {
@@ -308,7 +348,87 @@ function bindStaticEvents() {
             confirmKeyboardMenuAction();
         });
     }
+    els.chatToggles?.forEach((button) => button.addEventListener("click", openChat));
+    if (els.chatClose) els.chatClose.addEventListener("click", closeChat);
+    if (els.chatForm) els.chatForm.addEventListener("submit", sendChatMessage);
+    if (els.chatInput) {
+        els.chatInput.addEventListener("keydown", (event) => {
+            if (event.key === "Escape") {
+                event.preventDefault();
+                closeChat();
+            }
+        });
+    }
     document.addEventListener("keydown", handleGameKeydown);
+}
+
+function setChatAvailability(available) {
+    els.chatToggles?.forEach((button) => {
+        button.disabled = !available;
+    });
+    if (els.chatInput) els.chatInput.disabled = !available;
+    if (els.chatSend) els.chatSend.disabled = !available;
+}
+
+function openChat() {
+    if (!state || !els.chatPanel) return;
+    chatUnread = 0;
+    els.chatPanel.classList.remove("hidden");
+    els.chatToggles?.forEach((button) => button.setAttribute("aria-expanded", "true"));
+    renderChat();
+    els.chatInput?.focus();
+}
+
+function closeChat() {
+    if (!els.chatPanel) return;
+    els.chatPanel.classList.add("hidden");
+    els.chatToggles?.forEach((button) => button.setAttribute("aria-expanded", "false"));
+    updateChatUnread();
+    const visibleToggle = els.chatToggles?.find((button) => button.offsetParent !== null);
+    visibleToggle?.focus();
+}
+
+function updateChatUnread() {
+    els.chatUnread?.forEach((badge) => {
+        badge.textContent = String(Math.min(chatUnread, 99));
+        badge.classList.toggle("hidden", chatUnread <= 0);
+    });
+}
+
+function renderChat() {
+    if (!els.chatMessages) return;
+    if (!chatMessages.length) {
+        els.chatMessages.innerHTML = '<p class="chat-empty">No messages yet.</p>';
+        updateChatUnread();
+        return;
+    }
+    els.chatMessages.innerHTML = chatMessages.map((message) => {
+        const sentAt = new Date(Number(message.sent_at) || Date.now());
+        const timeLabel = sentAt.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+        return `
+            <article class="chat-message ${message.sender_sid === mySid ? "mine" : ""}">
+                <div class="chat-message-meta">
+                    <strong>${escapeHtml(message.username || "Player")}</strong>
+                    <time datetime="${escapeHtml(sentAt.toISOString())}">${escapeHtml(timeLabel)}</time>
+                </div>
+                <p>${escapeHtml(message.message || "")}</p>
+            </article>
+        `;
+    }).join("");
+    updateChatUnread();
+    if (!els.chatPanel?.classList.contains("hidden")) {
+        els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+    }
+}
+
+function sendChatMessage(event) {
+    event.preventDefault();
+    if (!state || !els.chatInput) return;
+    const message = els.chatInput.value.trim();
+    if (!message) return;
+    socket.emit("send_chat", { room: ROOM_ID, message });
+    els.chatInput.value = "";
+    els.chatInput.focus();
 }
 
 /** 3D CSS hit-tests are unreliable; resolve cards by stack + AABB fallback. */
@@ -1168,10 +1288,13 @@ function applyTableCameraSettings(force = false) {
     const compactLandscape = window.matchMedia?.(
         "(max-width: 850px) and (orientation: landscape)",
     )?.matches;
-    const stageWidth = Math.max(compactLandscape ? 260 : 320, measuredWidth);
-    const stageHeight = Math.max(compactLandscape ? 250 : 420, measuredHeight);
-    const topClearance = compactLandscape ? 14 : stageWidth < 700 ? 34 : 42;
-    const legReserve = compactLandscape ? 24 : stageWidth < 700 ? 74 : 122;
+    // A phone browser can leave less than 250px after its landscape toolbars.
+    // Never size the table against an invented minimum or the local/bottom row
+    // will be rendered below the clipped play area.
+    const stageWidth = compactLandscape ? measuredWidth : Math.max(320, measuredWidth);
+    const stageHeight = compactLandscape ? measuredHeight : Math.max(420, measuredHeight);
+    const topClearance = compactLandscape ? 6 : stageWidth < 700 ? 34 : 42;
+    const legReserve = compactLandscape ? 10 : stageWidth < 700 ? 74 : 122;
     const l = TABLE.cameraLength;
     const d = TABLE.cameraDistance;
     const h = TABLE.cameraHeight;
@@ -1179,8 +1302,9 @@ function applyTableCameraSettings(force = false) {
     const nearPerUnit = h * l * b / (l * l - d * b);
     const farPerUnit = h * l * b / (l * l + d * b);
     const unitByWidth = stageWidth * 0.92 / TABLE.width;
-    const unitByHeight = (stageHeight - topClearance - legReserve) / (nearPerUnit + farPerUnit);
-    const scale = Math.max(compactLandscape ? 20 : 24, Math.min(110, unitByWidth, unitByHeight));
+    const usableHeight = Math.max(1, stageHeight - topClearance - legReserve);
+    const unitByHeight = usableHeight / (nearPerUnit + farPerUnit);
+    const scale = Math.max(compactLandscape ? 8 : 24, Math.min(110, unitByWidth, unitByHeight));
     const centerY = topClearance + farPerUnit * scale;
     const cardWidth = TABLE.cardWidth * scale;
     const cardHeight = TABLE.cardHeight * scale;
