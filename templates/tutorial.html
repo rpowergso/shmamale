@@ -1,0 +1,204 @@
+{% extends "layout.html" %}
+{% block content %}
+<main class="tutorial-shell">
+    <header class="tutorial-topbar">
+        <a href="/homepage" class="btn btn-red small-btn">BACK</a>
+        <div class="tutorial-title">
+            <span class="eyebrow">HOW TO PLAY</span>
+            <strong>SHMAMALE TUTORIAL</strong>
+        </div>
+        <span id="tutorial-counter" class="tutorial-counter">1 / 9</span>
+    </header>
+
+    <div class="tutorial-progress" aria-label="Tutorial progress">
+        {% for step in range(9) %}
+        <button type="button" class="tutorial-progress-dot{% if step == 0 %} active{% endif %}" data-go-step="{{ step }}" aria-label="Go to step {{ step + 1 }}"></button>
+        {% endfor %}
+    </div>
+
+    <section class="tutorial-stage" aria-live="polite">
+        <article class="tutorial-step active" data-tutorial-step="0">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 1</span>
+                <h1>Keep your score low</h1>
+                <p>Every card left in your grid becomes points at the end of the round. Low cards help, high cards hurt, and empty spaces are worth zero.</p>
+                <div class="tutorial-callout green">
+                    <strong>Your mission</strong>
+                    Finish rounds with the lowest total and avoid reaching the room's bust score.
+                </div>
+                <p class="tutorial-fine-print"><strong>Card values:</strong> Ace is 1, number cards use their number, Jack is 11, Queen is 12, black King is 13, red King is −1, and the room sets jokers to −2 or 0.</p>
+                <p>Rooms can end when the first player busts or continue until only one player is left standing.</p>
+            </div>
+            <div class="tutorial-visual score-visual" aria-hidden="true">
+                <div class="tutorial-score good"><span>YOU</span><strong>2</strong><small>LOW</small></div>
+                <div class="tutorial-score"><span>RIVAL</span><strong>31</strong><small>RISKY</small></div>
+                <div class="tutorial-score danger"><span>BOT</span><strong>48</strong><small>NEAR BUST</small></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="1">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 2</span>
+                <h1>Learn your opening cards</h1>
+                <p>Each round begins with a face-down grid. Under the default rules, you may privately peek at your bottom two cards before taking your first action.</p>
+                <div class="tutorial-callout blue">
+                    <strong>Custom rooms</strong>
+                    The host can change the grid and decide which positions let you peek at your own cards or an opponent's cards.
+                </div>
+                <p>Remember what you see. The cards turn face down again, but their positions still matter.</p>
+            </div>
+            <div class="tutorial-visual board-lesson" aria-label="A two by two card grid with the bottom cards highlighted">
+                <div class="tutorial-card-back"></div>
+                <div class="tutorial-card-back"></div>
+                <div class="tutorial-card-back peek-card"><span>PEEK</span></div>
+                <div class="tutorial-card-back peek-card"><span>PEEK</span></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="2">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 3</span>
+                <h1>Choose one turn action</h1>
+                <p>At the start of your turn, choose to draw from the deck, take the top discard, or call the round.</p>
+                <div class="tutorial-choice-row" role="group" aria-label="Try the turn choices">
+                    <button type="button" class="tutorial-choice active" data-choice="draw">DRAW</button>
+                    <button type="button" class="tutorial-choice" data-choice="take">TAKE</button>
+                    <button type="button" class="tutorial-choice" data-choice="call">CALL</button>
+                </div>
+                <div id="tutorial-choice-answer" class="tutorial-choice-answer">Draw a hidden card. You may swap it into your grid or play it to the discard pile.</div>
+            </div>
+            <div class="tutorial-visual turn-visual" aria-hidden="true">
+                <div class="tutorial-pile deck"><span>DECK</span></div>
+                <div class="turn-arrow">OR</div>
+                <div class="tutorial-playing-card red"><b>7</b><i>♥</i></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="3">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 4</span>
+                <h1>Swap it or play it</h1>
+                <div class="tutorial-rule-pair">
+                    <div><strong>Draw from deck</strong><p>Swap the drawn card with one of your grid cards, or play it directly to the discard.</p></div>
+                    <div><strong>Take the discard</strong><p>You must swap it into your own grid. You cannot play it back immediately.</p></div>
+                </div>
+                <div class="tutorial-callout yellow">
+                    <strong>Important</strong>
+                    A special power only activates when a card drawn from the deck is played directly to the discard.
+                </div>
+            </div>
+            <div class="tutorial-visual swap-visual" aria-hidden="true">
+                <div class="tutorial-playing-card black"><b>2</b><i>♣</i></div>
+                <span class="swap-arrows">⇄</span>
+                <div class="tutorial-card-back"></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="4">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 5</span>
+                <h1>Take a look at the keybinds</h1>
+                <p>You can play the whole game from the keyboard. Player numbers stay consistent, and <kbd>1</kbd> always brings the focus back to your own grid.</p>
+                <div class="tutorial-rule-pair tutorial-key-pair">
+                    <div><strong><kbd>1</kbd>–<kbd>6</kbd> then arrows / WASD</strong><p>Choose a player, then move the gold focus between their cards.</p></div>
+                    <div><strong><kbd>Space</kbd></strong><p>Select the focused card or confirm the highlighted menu choice.</p></div>
+                    <div><strong><kbd>Enter</kbd></strong><p>Open the draw, discard, and call menu. Press it again after a deck draw to play the held card.</p></div>
+                    <div><strong><kbd>K</kbd> / <kbd>?</kbd></strong><p>Open the full keybind guide during a game. <kbd>Esc</kbd> closes menus.</p></div>
+                </div>
+                <div class="tutorial-callout blue"><strong>Try both styles</strong>Mouse and keyboard controls work together, so you can switch between them at any time.</div>
+            </div>
+            <div class="tutorial-visual tutorial-keyboard-panel">
+                <strong class="tutorial-legend-title">HIGHLIGHT COLORS</strong>
+                <div class="tutorial-highlight-row"><i class="legend-swatch keyboard"></i><span><b>Gold</b> — keyboard focus</span></div>
+                <div class="tutorial-highlight-row"><i class="legend-swatch peek"></i><span><b>Cyan dashed</b> — opening peek</span></div>
+                <div class="tutorial-highlight-row"><i class="legend-swatch looked"></i><span><b>Blue</b> — recently viewed</span></div>
+                <div class="tutorial-highlight-row"><i class="legend-swatch switched"></i><span><b>Purple</b> — recently switched</span></div>
+                <p>Watch these colors—they show what your next selection will affect and what just happened.</p>
+            </div>
+        </article>
+
+        <article class="tutorial-step special-step" data-tutorial-step="5">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 6</span>
+                <h1>Remember the special-card song</h1>
+                <p>Play these cards from a deck draw to use their power:</p>
+                <div class="special-song" aria-label="Special card song">
+                    <p><strong>7, 8</strong><span>see your fate</span></p>
+                    <p><strong>9, 10</strong><span>look at a friend</span></p>
+                    <p><strong>Jack, Queen</strong><span>switch unseen</span></p>
+                    <p><strong>Black King</strong><span>switch looking</span></p>
+                </div>
+                <p class="tutorial-fine-print">A red King is worth −1 but has no special power. A black King lets you inspect two cards before deciding whether to switch them.</p>
+            </div>
+            <div class="tutorial-visual special-fan" aria-hidden="true">
+                <div class="tutorial-playing-card red tilt-left"><b>8</b><i>♦</i></div>
+                <div class="tutorial-playing-card black"><b>Q</b><i>♠</i></div>
+                <div class="tutorial-playing-card black tilt-right"><b>K</b><i>♣</i></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="6">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 7</span>
+                <h1>Burn matching ranks</h1>
+                <p>When the top discard matches the rank of a card you know, try to burn it—even outside your normal turn. Suits do not matter.</p>
+                <ul class="tutorial-list">
+                    <li>Burn your own matching card to remove it and leave an empty zero-point space.</li>
+                    <li>Burn an opponent's card, then give them one of yours.</li>
+                    <li>Miss the burn and you take a penalty card. The failed card stays visible through the next player's turn.</li>
+                </ul>
+                <div class="tutorial-callout red"><strong>Reaction race</strong>If multiple players burn together, the fastest valid attempt wins and later attempts take a penalty.</div>
+            </div>
+            <div class="tutorial-visual burn-visual" aria-hidden="true">
+                <div class="tutorial-playing-card red"><b>9</b><i>♥</i></div>
+                <span class="burn-equals">=</span>
+                <div class="tutorial-playing-card black"><b>9</b><i>♣</i></div>
+                <strong class="burn-word">BURN!</strong>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="7">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 8</span>
+                <h1>Call when your grid is ready</h1>
+                <p>Call at the start of your turn before drawing or taking the discard. Calling protects your cards from opponents' switch abilities.</p>
+                <ul class="tutorial-list">
+                    <li>The first call gives every other active player one final turn.</li>
+                    <li>Calling uses your turn.</li>
+                    <li>After calling, you cannot draw, use abilities, or attempt burns for the rest of the round.</li>
+                </ul>
+                <div class="tutorial-callout yellow"><strong>Do not call blindly</strong>If the first caller has the strictly highest hand, their round points are doubled.</div>
+            </div>
+            <div class="tutorial-visual call-visual" aria-hidden="true">
+                <div class="call-burst">CALL!</div>
+                <div class="final-turn-ring"><span>1</span><span>FINAL TURN EACH</span></div>
+            </div>
+        </article>
+
+        <article class="tutorial-step" data-tutorial-step="8">
+            <div class="tutorial-step-copy">
+                <span class="tutorial-step-number">STEP 9</span>
+                <h1>Score, survive, repeat</h1>
+                <p>At round end, all remaining card values are added to each player's running score. Empty slots count as zero. If a hand is negative, every hand is shifted equally until the lowest round score is zero.</p>
+                <div class="tutorial-rule-pair">
+                    <div><strong>Last player standing</strong><p>Players who reach the bust score become spectators. The final survivor wins.</p></div>
+                    <div><strong>First player busts</strong><p>The game ends when anyone busts. The lowest running score wins.</p></div>
+                </div>
+                <div class="tutorial-callout green"><strong>You are ready</strong>Remember your cards, replace high values, watch the discard, and use the song.</div>
+            </div>
+            <div class="tutorial-visual finish-visual" aria-hidden="true">
+                <span>LOW SCORE</span>
+                <strong>WINS</strong>
+                <div>7, 8 · SEE YOUR FATE</div>
+            </div>
+        </article>
+    </section>
+
+    <footer class="tutorial-controls">
+        <button id="tutorial-prev" type="button" class="btn btn-gray" disabled>PREVIOUS</button>
+        <button id="tutorial-next" type="button" class="btn btn-green">NEXT</button>
+    </footer>
+</main>
+
+<script src="{{ url_for('static', filename='js/tutorial.js') }}"></script>
+{% endblock %}

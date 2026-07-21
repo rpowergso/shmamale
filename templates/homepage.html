@@ -3,41 +3,18 @@
 <main class="home-shell">
     <h1 class="game-title">SHMAMALE</h1>
 
-    <section class="menu-grid">
+    <section class="menu-grid unified-menu">
         <div class="menu-card menu-card-purple">
-            <h2>MULTIPLAYER</h2>
-            <a href="/create-room" class="btn btn-purple full">CREATE ROOM</a>
+            <h2>PLAY</h2>
+            <p class="menu-card-copy">Create one room, invite friends with the code, and add bots in the waiting room.</p>
+            <a href="/create-room" class="btn btn-purple full">CREATE PLAY ROOM</a>
             <form action="/join-room" method="POST" class="join-form">
                 <input type="text" name="room_id" maxlength="8" placeholder="ROOM CODE" autocomplete="off">
                 <button type="submit" class="btn btn-green full">JOIN ROOM</button>
             </form>
+            <div class="menu-divider"><span>NEW TO SHMAMALE?</span></div>
+            <a href="/tutorial" class="btn btn-blue full">HOW TO PLAY</a>
         </div>
-
-        <div class="menu-card menu-card-green">
-            <h2>VS BOTS</h2>
-            <form action="/botgamescreen" method="POST" class="join-form">
-                <label class="menu-label">
-                    Bots
-                    <select name="bot_count">
-                        <option value="1">1 bot</option>
-                        <option value="2" selected>2 bots</option>
-                        <option value="3">3 bots</option>
-                        <option value="4">4 bots</option>
-                        <option value="5">5 bots</option>
-                    </select>
-                </label>
-                <label class="menu-label">
-                    Difficulty
-                    <select name="difficulty">
-                        <option value="easy">Easy</option>
-                        <option value="medium" selected>Medium</option>
-                        <option value="hard">Hard</option>
-                    </select>
-                </label>
-                <button type="submit" class="btn btn-green full">PLAY BOTS</button>
-            </form>
-        </div>
-
     </section>
 </main>
 {% endblock %}

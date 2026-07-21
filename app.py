@@ -20,6 +20,11 @@ def homepage():
     return render_template("homepage.html")
 
 
+@app.route("/tutorial")
+def tutorial():
+    return render_template("tutorial.html")
+
+
 @app.route("/create-room")
 def create_room():
     room_id = str(uuid.uuid4())[:4].upper()
@@ -34,32 +39,14 @@ def join_room_post():
     return redirect(url_for("homepage"))
 
 
-def bot_options():
-    room_id = str(uuid.uuid4())[:4].upper()
-    try:
-        bot_count = max(1, min(5, int(request.form.get("bot_count", 2))))
-    except (TypeError, ValueError):
-        bot_count = 2
-    bot_difficulty = request.form.get("difficulty", "medium").lower()
-    if bot_difficulty not in {"easy", "medium", "hard"}:
-        bot_difficulty = "medium"
-    return room_id, bot_count, bot_difficulty
-
-
 @app.route("/botgamescreen", methods=["GET", "POST"])
 def bot_game():
-    room_id, bot_count, bot_difficulty = bot_options()
-    return render_template(
-        "botgamescreen.html",
-        room_id=room_id,
-        bot_count=bot_count,
-        bot_difficulty=bot_difficulty,
-    )
+    return redirect(url_for("create_room"))
 
 
 @app.route("/bot-room", methods=["POST"])
 def bot_room_post():
-    return bot_game()
+    return redirect(url_for("create_room"))
 
 
 @app.route("/multiplayer/<room_id>")

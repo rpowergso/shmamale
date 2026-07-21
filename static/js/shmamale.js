@@ -27,6 +27,17 @@ let recentCardMarks = {
 };
 let stateUpdateQueue = Promise.resolve();
 let finalCountdownEndsAt = 0;
+let lastBurnShowdownId = 0;
+let burnShowdownTimer = null;
+let activeGridPeekMode = "self";
+let tableCameraCache = null;
+let seatLayoutCache = { key: "", positions: [] };
+let keyboardNav = {
+    ownerSid: "",
+    index: 0,
+    menuOpen: false,
+    menuIndex: 0,
+};
 
 const els = {};
 
@@ -43,7 +54,7 @@ document.addEventListener("DOMContentLoaded", () => {
     window.setInterval(updateCountdownText, 100);
     window.addEventListener("resize", () => {
         if (!state) return;
-        applyTableCameraSettings();
+        applyTableCameraSettings(true);
         if (els.seats && state.players) renderSeats();
         else if (els.seats) layoutNameplates(rotatedOrder());
         layoutArLabels();
@@ -88,6 +99,8 @@ async function applyGameState(nextState) {
 
     prevState = state;
     state = nextState;
+    normalizeKeyboardFocus();
+    if (!canChooseNow()) keyboardNav.menuOpen = false;
     finalCountdownEndsAt = Number.isFinite(nextState.final_countdown_ends_at)
         ? nextState.final_countdown_ends_at
         : 0;
@@ -154,9 +167,18 @@ function cacheEls() {
     els.game = document.getElementById("game");
     els.playerList = document.getElementById("player-list");
     els.hostControls = document.getElementById("host-controls");
+    els.settingPreset = document.getElementById("setting-preset");
     els.settingTarget = document.getElementById("setting-target");
-    els.settingDecks = document.getElementById("setting-decks");
-    els.settingJokers = document.getElementById("setting-jokers");
+    els.settingWinCondition = document.getElementById("setting-win-condition");
+    els.settingGridRows = document.getElementById("setting-grid-rows");
+    els.settingGridCols = document.getElementById("setting-grid-cols");
+    els.settingJokerValue = document.getElementById("setting-joker-value");
+    els.settingDeckCount = document.getElementById("setting-deck-count");
+    els.settingPeekDistance = document.getElementById("setting-peek-distance");
+    els.settingPeekDirection = document.getElementById("setting-peek-direction");
+    els.gridRuleEditor = document.getElementById("grid-rule-editor");
+    els.peekModeTools = document.getElementById("peek-mode-tools");
+    els.addBotBtn = document.getElementById("add-bot-btn");
     els.readyBtn = document.getElementById("ready-btn");
     els.startBtn = document.getElementById("start-btn");
     els.turnText = document.getElementById("turn-text");
@@ -175,8 +197,13 @@ function cacheEls() {
     els.nameplates = document.getElementById("nameplates");
     els.flyLayer = document.getElementById("fly-layer");
     els.abilityOverlay = document.getElementById("ability-overlay");
+    els.burnShowdown = document.getElementById("burn-showdown");
     els.actionHint = document.getElementById("action-hint");
     els.toast = document.getElementById("toast");
+    els.keyboardActionMenu = document.getElementById("keyboard-action-menu");
+    els.keybindsBtn = document.getElementById("keybinds-btn");
+    els.keybindsOverlay = document.getElementById("keybinds-overlay");
+    els.keybindsClose = document.getElementById("keybinds-close");
 }
 
 function bindStaticEvents() {
@@ -190,16 +217,69 @@ function bindStaticEvents() {
         els.startBtn.addEventListener("click", () => socket.emit("start_game", { room: ROOM_ID }));
     }
 
-    [els.settingTarget, els.settingDecks, els.settingJokers].filter(Boolean).forEach((input) => {
-        input.addEventListener("change", () => {
-            socket.emit("update_settings", {
+    if (els.settingPreset) {
+        els.settingPreset.addEventListener("change", () => {
+            if (els.settingPreset.value === "default") {
+                socket.emit("update_settings", { room: ROOM_ID, preset: "default" });
+            } else {
+                emitRoomSettings();
+            }
+        });
+    }
+    [
+        els.settingTarget,
+        els.settingWinCondition,
+        els.settingJokerValue,
+        els.settingDeckCount,
+        els.settingPeekDistance,
+        els.settingPeekDirection,
+    ].filter(Boolean).forEach((input) => input.addEventListener("change", () => emitRoomSettings()));
+    [els.settingGridRows, els.settingGridCols].filter(Boolean).forEach((input) => {
+        input.addEventListener("change", resizeGridSettings);
+    });
+    if (els.peekModeTools) {
+        els.peekModeTools.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-peek-mode]");
+            if (!button || button.disabled) return;
+            activeGridPeekMode = button.dataset.peekMode;
+            renderPeekModeTools();
+        });
+    }
+    if (els.gridRuleEditor) {
+        els.gridRuleEditor.addEventListener("click", (event) => {
+            const cell = event.target.closest("[data-grid-index]");
+            if (!cell || cell.disabled || !state) return;
+            const index = Number(cell.dataset.gridIndex);
+            const modes = state.settings.grid_peek_modes.slice();
+            modes[index] = modes[index] === activeGridPeekMode ? "none" : activeGridPeekMode;
+            state.settings.grid_peek_modes = modes;
+            state.settings.preset = "custom";
+            els.settingPreset.value = "custom";
+            renderGridRuleEditor();
+            emitRoomSettings({ grid_peek_modes: modes });
+        });
+    }
+    if (els.addBotBtn) {
+        els.addBotBtn.addEventListener("click", () => {
+            socket.emit("add_bot", { room: ROOM_ID, difficulty: "medium" });
+        });
+    }
+    if (els.playerList) {
+        els.playerList.addEventListener("change", (event) => {
+            const select = event.target.closest("[data-bot-difficulty]");
+            if (!select) return;
+            socket.emit("update_bot_difficulty", {
                 room: ROOM_ID,
-                target_score: els.settingTarget.value,
-                deck_count: els.settingDecks.value,
-                jokers: els.settingJokers.value,
+                sid: select.dataset.botDifficulty,
+                difficulty: select.value,
             });
         });
-    });
+        els.playerList.addEventListener("click", (event) => {
+            const remove = event.target.closest("[data-remove-bot]");
+            if (!remove) return;
+            socket.emit("remove_bot", { room: ROOM_ID, sid: remove.dataset.removeBot });
+        });
+    }
 
     if (els.drawBtn) els.drawBtn.addEventListener("click", tryDraw);
     if (els.drawPrompt) els.drawPrompt.addEventListener("click", tryDraw);
@@ -207,6 +287,25 @@ function bindStaticEvents() {
     if (els.takePrompt) els.takePrompt.addEventListener("click", tryTake);
     if (els.playPrompt) els.playPrompt.addEventListener("click", playDrawn);
     if (els.callBtn) els.callBtn.addEventListener("click", () => socket.emit("call_round", { room: ROOM_ID }));
+    if (els.keybindsBtn) els.keybindsBtn.addEventListener("click", openKeybinds);
+    if (els.keybindsClose) els.keybindsClose.addEventListener("click", closeKeybinds);
+    if (els.keybindsOverlay) {
+        els.keybindsOverlay.addEventListener("click", (event) => {
+            if (event.target === els.keybindsOverlay) closeKeybinds();
+        });
+    }
+    if (els.keyboardActionMenu) {
+        els.keyboardActionMenu.addEventListener("click", (event) => {
+            const button = event.target.closest("[data-keyboard-action]");
+            if (!button || button.disabled) return;
+            const actions = keyboardMenuActions();
+            const index = actions.findIndex((action) => action.id === button.dataset.keyboardAction);
+            if (index < 0) return;
+            keyboardNav.menuIndex = index;
+            confirmKeyboardMenuAction();
+        });
+    }
+    document.addEventListener("keydown", handleGameKeydown);
 }
 
 /** 3D CSS hit-tests are unreliable; resolve cards by stack + AABB fallback. */
@@ -380,6 +479,8 @@ function updateRecentCardMarks(action, actionKey, nextState) {
 function render(options = {}) {
     if (!state) return;
     if (state.status === "lobby") {
+        keyboardNav.menuOpen = false;
+        renderKeyboardActionMenu();
         if (els.lobby) els.lobby.classList.remove("hidden");
         els.game.classList.add("hidden");
         if (els.lobby) renderLobby();
@@ -393,20 +494,49 @@ function render(options = {}) {
 
 function renderLobby() {
     const amHost = state.host_sid === mySid;
-    els.hostControls.classList.toggle("hidden", !amHost);
+    const humanCount = state.player_order.filter((sid) => !state.players[sid]?.is_bot).length;
+    const botCount = state.player_order.filter((sid) => state.players[sid]?.is_bot).length;
+    const botOnlyOpponents = humanCount === 1 && botCount > 0;
+    els.hostControls.classList.toggle("read-only", !amHost);
     els.startBtn.classList.toggle("hidden", !amHost);
+    els.addBotBtn.classList.toggle("hidden", !amHost || state.player_order.length >= 6);
 
+    els.settingPreset.value = state.settings.preset || "custom";
     els.settingTarget.value = state.settings.target_score;
-    els.settingDecks.value = state.settings.deck_count;
-    els.settingJokers.value = state.settings.jokers;
+    els.settingWinCondition.value = state.settings.win_condition;
+    els.settingGridRows.value = state.settings.grid_rows;
+    els.settingGridCols.value = state.settings.grid_cols;
+    els.settingJokerValue.value = state.settings.joker_value;
+    els.settingDeckCount.value = state.settings.deck_count || 1;
+    els.settingPeekDistance.value = state.settings.opponent_peek_distance;
+    els.settingPeekDirection.value = state.settings.opponent_peek_direction;
+    els.hostControls.querySelectorAll("input, select, button").forEach((control) => {
+        control.disabled = !amHost;
+    });
+    renderPeekModeTools();
+    renderGridRuleEditor();
 
     els.playerList.innerHTML = state.player_order.map((sid) => {
         const player = state.players[sid];
-        const readyText = player.ready ? "READY" : "WAITING";
+        const autoReady = botOnlyOpponents && !player.is_bot;
+        const readyText = player.ready || autoReady ? "READY" : "WAITING";
+        const difficulty = player.difficulty || "medium";
+        const botControls = player.is_bot && amHost
+            ? `<div class="bot-row-controls">
+                <select data-bot-difficulty="${escapeHtml(sid)}" aria-label="${escapeHtml(player.username)} difficulty">
+                    ${["easy", "medium", "hard", "custom"].map((level) => (
+                        `<option value="${level}" ${difficulty === level ? "selected" : ""}>${level.toUpperCase()}</option>`
+                    )).join("")}
+                </select>
+                <button type="button" class="bot-remove" data-remove-bot="${escapeHtml(sid)}" aria-label="Remove ${escapeHtml(player.username)}">×</button>
+            </div>`
+            : player.is_bot
+                ? `<span class="bot-difficulty-label">${escapeHtml(difficulty.toUpperCase())}</span>`
+                : `<b style="color:${player.ready || autoReady ? "#2ecc71" : "#e74c3c"}">${readyText}</b>`;
         return `
             <div class="lobby-player ${player.is_host ? "host" : ""}">
-                <span>${escapeHtml(player.username)} ${player.is_host ? "HOST" : ""} ${player.is_bot ? "BOT" : ""}</span>
-                <b style="color:${player.ready ? "#2ecc71" : "#e74c3c"}">${readyText}</b>
+                <span class="lobby-player-name">${escapeHtml(player.username)} ${player.is_host ? "<em>HOST</em>" : ""} ${player.is_bot ? "<em>BOT</em>" : ""}</span>
+                ${botControls}
             </div>
         `;
     }).join("");
@@ -416,10 +546,45 @@ function renderLobby() {
         ready = me.ready;
         els.readyBtn.textContent = ready ? "NOT READY" : "READY UP";
         els.readyBtn.className = `btn ${ready ? "btn-red" : "btn-blue"}`;
+        els.readyBtn.classList.toggle("hidden", botOnlyOpponents);
     }
 }
 
+function renderPeekModeTools() {
+    if (!els.peekModeTools) return;
+    els.peekModeTools.querySelectorAll("[data-peek-mode]").forEach((button) => {
+        button.classList.toggle("active", button.dataset.peekMode === activeGridPeekMode);
+    });
+}
+
+function gridModeMeta(mode) {
+    if (mode === "self") return { label: "OWN", symbol: "YOU", className: "self" };
+    if (mode === "all_opponents") return { label: "ALL OPPONENTS", symbol: "ALL", className: "all" };
+    if (mode === "seat_opponent") return { label: "CHOSEN OPPONENT", symbol: "SEAT", className: "chosen" };
+    return { label: "NO OPENING PEEK", symbol: "—", className: "none" };
+}
+
+function renderGridRuleEditor() {
+    if (!els.gridRuleEditor || !state) return;
+    const rows = Number(state.settings.grid_rows);
+    const cols = Number(state.settings.grid_cols);
+    const modes = state.settings.grid_peek_modes || [];
+    const amHost = state.host_sid === mySid;
+    els.gridRuleEditor.style.gridTemplateColumns = `repeat(${cols}, minmax(54px, 72px))`;
+    els.gridRuleEditor.innerHTML = Array.from({ length: rows * cols }, (_, index) => {
+        const meta = gridModeMeta(modes[index]);
+        return `
+            <button type="button" class="grid-rule-cell ${meta.className}" data-grid-index="${index}" ${amHost ? "" : "disabled"} title="${meta.label}">
+                <span class="grid-card-corner">${index + 1}</span>
+                <strong>${meta.symbol}</strong>
+                <small>${meta.label}</small>
+            </button>
+        `;
+    }).join("");
+}
+
 function renderGame(options = {}) {
+    normalizeKeyboardFocus();
     const current = state.players[state.current_turn_sid];
     const myTurn = state.current_turn_sid === mySid;
     els.turnText.textContent = myTurn ? "YOUR TURN" : `${current ? current.username.toUpperCase() : "WAITING"}'S TURN`;
@@ -431,8 +596,10 @@ function renderGame(options = {}) {
     renderSeats(options);
     layoutArLabels();
     renderAbilityOverlay();
+    renderBurnShowdown();
     renderHint();
     renderCallBtn();
+    renderKeyboardActionMenu();
 }
 
 function phaseText() {
@@ -460,10 +627,11 @@ function renderScores() {
     if (!els.scoreChips) return;
     els.scoreChips.innerHTML = state.player_order.map((sid) => {
         const player = state.players[sid];
+        const keyboardNumber = keyboardPlayerOrder().indexOf(sid) + 1;
         return `
-            <div class="score-chip ${sid === mySid ? "me" : ""}" title="${escapeHtml(player.username)}">
-                <span class="score-name">${escapeHtml(player.username)}</span>
-                <b>${player.score}</b>
+            <div class="score-chip ${sid === mySid ? "me" : ""} ${player.eliminated ? "eliminated" : ""}" title="${escapeHtml(player.username)}">
+                <span class="score-seat-label"><i>${keyboardNumber}</i><span class="score-name">${escapeHtml(player.username)}</span></span>
+                <b>${player.score}${player.eliminated ? " · OUT" : ""}</b>
             </div>
         `;
     }).join("");
@@ -475,18 +643,298 @@ function renderCallBtn() {
     els.callBtn.textContent = state.first_caller_sid ? "PROTECT" : "CALL";
 }
 
+function emitRoomSettings(overrides = {}) {
+    if (!state || state.host_sid !== mySid || state.status !== "lobby") return;
+    const settings = state.settings;
+    socket.emit("update_settings", {
+        room: ROOM_ID,
+        preset: "custom",
+        target_score: els.settingTarget?.value ?? settings.target_score,
+        win_condition: els.settingWinCondition?.value ?? settings.win_condition,
+        grid_rows: els.settingGridRows?.value ?? settings.grid_rows,
+        grid_cols: els.settingGridCols?.value ?? settings.grid_cols,
+        grid_peek_modes: overrides.grid_peek_modes || settings.grid_peek_modes,
+        opponent_peek_distance: els.settingPeekDistance?.value ?? settings.opponent_peek_distance,
+        opponent_peek_direction: els.settingPeekDirection?.value ?? settings.opponent_peek_direction,
+        deck_count: els.settingDeckCount?.value ?? settings.deck_count,
+        joker_value: els.settingJokerValue?.value ?? settings.joker_value,
+        ...overrides,
+    });
+}
+
+function resizeGridSettings() {
+    if (!state) return;
+    const oldRows = Number(state.settings.grid_rows);
+    const oldCols = Number(state.settings.grid_cols);
+    const newRows = Number(els.settingGridRows.value);
+    const newCols = Number(els.settingGridCols.value);
+    const modes = Array(newRows * newCols).fill("none");
+    for (let row = 0; row < Math.min(oldRows, newRows); row += 1) {
+        for (let col = 0; col < Math.min(oldCols, newCols); col += 1) {
+            modes[row * newCols + col] = state.settings.grid_peek_modes[row * oldCols + col] || "none";
+        }
+    }
+    state.settings.grid_rows = newRows;
+    state.settings.grid_cols = newCols;
+    state.settings.grid_peek_modes = modes;
+    state.settings.preset = "custom";
+    els.settingPreset.value = "custom";
+    renderGridRuleEditor();
+    emitRoomSettings({
+        grid_rows: newRows,
+        grid_cols: newCols,
+        grid_peek_modes: modes,
+    });
+}
+
 function canChooseNow() {
     return (
         state.status === "playing"
         && state.phase === "choose"
         && state.current_turn_sid === mySid
         && !state.players[mySid]?.called
+        && !state.players[mySid]?.eliminated
         && !state.pending_burn
     );
 }
 
 function holdingMyDraw() {
     return state.pending_draw && state.pending_draw.sid === mySid && state.pending_draw.card;
+}
+
+function keyboardPlayerOrder() {
+    if (!state?.players) return [];
+    const order = (state.player_order || []).filter((sid) => state.players[sid]);
+    if (!state.players[mySid]) return order;
+    return [mySid, ...order.filter((sid) => sid !== mySid)];
+}
+
+function nonEmptyCardIndexes(ownerSid) {
+    return (state?.players?.[ownerSid]?.board || [])
+        .map((slot, index) => (!slot.empty ? index : -1))
+        .filter((index) => index >= 0);
+}
+
+function normalizeKeyboardFocus() {
+    if (!state?.players) return;
+    const order = keyboardPlayerOrder();
+    if (!order.length) {
+        keyboardNav.ownerSid = "";
+        keyboardNav.index = 0;
+        return;
+    }
+    if (!order.includes(keyboardNav.ownerSid)) {
+        keyboardNav.ownerSid = order[0];
+    }
+    let indexes = nonEmptyCardIndexes(keyboardNav.ownerSid);
+    if (!indexes.length) {
+        const nextOwner = order.find((sid) => nonEmptyCardIndexes(sid).length);
+        if (!nextOwner) return;
+        keyboardNav.ownerSid = nextOwner;
+        indexes = nonEmptyCardIndexes(nextOwner);
+    }
+    if (!indexes.includes(keyboardNav.index)) keyboardNav.index = indexes[0];
+}
+
+function selectKeyboardPlayer(number) {
+    const order = keyboardPlayerOrder();
+    const ownerSid = order[number - 1];
+    if (!ownerSid) {
+        showToast(`No player is assigned to key ${number}.`);
+        return;
+    }
+    const indexes = nonEmptyCardIndexes(ownerSid);
+    if (!indexes.length) {
+        showToast(`${state.players[ownerSid]?.username || "That player"} has no cards left.`);
+        return;
+    }
+    keyboardNav.ownerSid = ownerSid;
+    if (!indexes.includes(keyboardNav.index)) keyboardNav.index = indexes[0];
+    refreshKeyboardFocusDom();
+}
+
+function moveKeyboardCard(dx, dy) {
+    normalizeKeyboardFocus();
+    const indexes = nonEmptyCardIndexes(keyboardNav.ownerSid);
+    if (indexes.length < 2) return;
+    const cols = Math.max(1, gridColsForBoard(state.players[keyboardNav.ownerSid].board.length));
+    const currentRow = Math.floor(keyboardNav.index / cols);
+    const currentCol = keyboardNav.index % cols;
+    const candidates = indexes.map((index) => {
+        const row = Math.floor(index / cols);
+        const col = index % cols;
+        const rowDelta = row - currentRow;
+        const colDelta = col - currentCol;
+        const forward = dx ? colDelta * dx : rowDelta * dy;
+        return {
+            index,
+            forward,
+            side: dx ? Math.abs(rowDelta) : Math.abs(colDelta),
+        };
+    }).filter((item) => item.forward > 0);
+    if (!candidates.length) return;
+    candidates.sort((a, b) => a.forward - b.forward || a.side - b.side || a.index - b.index);
+    keyboardNav.index = candidates[0].index;
+    refreshKeyboardFocusDom();
+}
+
+function refreshKeyboardFocusDom() {
+    document.querySelectorAll(".board-card.keyboard-focus").forEach((card) => card.classList.remove("keyboard-focus"));
+    document.querySelectorAll(".seat.keyboard-target, .nameplate.keyboard-target").forEach((item) => item.classList.remove("keyboard-target"));
+    if (!keyboardNav.ownerSid) return;
+    const owner = CSS.escape(keyboardNav.ownerSid);
+    const card = document.querySelector(`.board-card[data-owner="${owner}"][data-index="${keyboardNav.index}"]`);
+    if (card && !card.classList.contains("empty")) card.classList.add("keyboard-focus");
+    document.querySelector(`.seat[data-sid="${owner}"]`)?.classList.add("keyboard-target");
+    document.querySelector(`.nameplate[data-nameplate="${owner}"]`)?.classList.add("keyboard-target");
+}
+
+function keyboardMenuActions() {
+    return [
+        { id: "draw", label: "DRAW DECK", detail: "Pick up a hidden card", enabled: Boolean(state?.draw_count) },
+        { id: "take", label: "TAKE DISCARD", detail: "Must swap into your grid", enabled: Boolean(state?.discard_top) },
+        { id: "call", label: "CALL", detail: "End your turn and begin the finish", enabled: true },
+    ];
+}
+
+function normalizeKeyboardMenuIndex(actions = keyboardMenuActions()) {
+    if (actions[keyboardNav.menuIndex]?.enabled) return;
+    const firstEnabled = actions.findIndex((action) => action.enabled);
+    keyboardNav.menuIndex = Math.max(0, firstEnabled);
+}
+
+function renderKeyboardActionMenu() {
+    if (!els.keyboardActionMenu) return;
+    if (!keyboardNav.menuOpen || !canChooseNow()) {
+        keyboardNav.menuOpen = false;
+        els.keyboardActionMenu.classList.add("hidden");
+        els.keyboardActionMenu.innerHTML = "";
+        return;
+    }
+    const actions = keyboardMenuActions();
+    normalizeKeyboardMenuIndex(actions);
+    els.keyboardActionMenu.innerHTML = `
+        <div class="keyboard-menu-title"><span>ENTER</span> CHOOSE YOUR MOVE</div>
+        <div class="keyboard-menu-options">
+            ${actions.map((action, index) => `
+                <button type="button" class="keyboard-menu-option${index === keyboardNav.menuIndex ? " selected" : ""}" data-keyboard-action="${action.id}" ${action.enabled ? "" : "disabled"}>
+                    <strong>${action.label}</strong><small>${action.detail}</small>
+                </button>
+            `).join("")}
+        </div>
+        <p>Arrow keys / WASD to move · Space to confirm · Esc to close</p>
+    `;
+    els.keyboardActionMenu.classList.remove("hidden");
+}
+
+function moveKeyboardMenu(delta) {
+    const actions = keyboardMenuActions();
+    const enabled = actions.map((action, index) => (action.enabled ? index : -1)).filter((index) => index >= 0);
+    if (!enabled.length) return;
+    const current = enabled.indexOf(keyboardNav.menuIndex);
+    const offset = current < 0 ? 0 : current;
+    keyboardNav.menuIndex = enabled[(offset + delta + enabled.length) % enabled.length];
+    renderKeyboardActionMenu();
+}
+
+function confirmKeyboardMenuAction() {
+    if (!keyboardNav.menuOpen || !canChooseNow() || animating) return;
+    const action = keyboardMenuActions()[keyboardNav.menuIndex];
+    if (!action?.enabled) return;
+    keyboardNav.menuOpen = false;
+    renderKeyboardActionMenu();
+    if (action.id === "draw") tryDraw();
+    else if (action.id === "take") tryTake();
+    else if (action.id === "call") socket.emit("call_round", { room: ROOM_ID });
+}
+
+function openKeybinds() {
+    keyboardNav.menuOpen = false;
+    renderKeyboardActionMenu();
+    els.keybindsOverlay?.classList.remove("hidden");
+    els.keybindsClose?.focus();
+}
+
+function closeKeybinds() {
+    els.keybindsOverlay?.classList.add("hidden");
+    els.keybindsBtn?.focus();
+}
+
+function gameShortcutBlocked(target) {
+    return Boolean(target?.closest?.("input, textarea, select, button, a, [contenteditable='true']"));
+}
+
+function handleGameKeydown(event) {
+    const key = event.key.toLowerCase();
+    if (!els.keybindsOverlay?.classList.contains("hidden")) {
+        if (event.key === "Escape" || key === "k" || event.key === "?") {
+            event.preventDefault();
+            closeKeybinds();
+        }
+        return;
+    }
+    if (gameShortcutBlocked(event.target)) return;
+    if (key === "k" || event.key === "?") {
+        event.preventDefault();
+        openKeybinds();
+        return;
+    }
+    if (!state || state.status !== "playing" || !els.lobby?.classList.contains("hidden")) return;
+
+    if (event.key === "Escape") {
+        if (keyboardNav.menuOpen) {
+            event.preventDefault();
+            keyboardNav.menuOpen = false;
+            renderKeyboardActionMenu();
+        }
+        return;
+    }
+    if (/^[1-6]$/.test(event.key)) {
+        event.preventDefault();
+        selectKeyboardPlayer(Number(event.key));
+        return;
+    }
+
+    const direction = {
+        ArrowLeft: [-1, 0], a: [-1, 0],
+        ArrowRight: [1, 0], d: [1, 0],
+        ArrowUp: [0, -1], w: [0, -1],
+        ArrowDown: [0, 1], s: [0, 1],
+    }[event.key] || ({ a: [-1, 0], d: [1, 0], w: [0, -1], s: [0, 1] })[key];
+    if (direction) {
+        event.preventDefault();
+        if (keyboardNav.menuOpen) moveKeyboardMenu(direction[0] < 0 || direction[1] < 0 ? -1 : 1);
+        else moveKeyboardCard(direction[0], direction[1]);
+        return;
+    }
+    if (event.code === "Space") {
+        event.preventDefault();
+        if (keyboardNav.menuOpen) {
+            confirmKeyboardMenuAction();
+            return;
+        }
+        normalizeKeyboardFocus();
+        if (!keyboardNav.ownerSid) return;
+        cardClicked(keyboardNav.ownerSid, keyboardNav.index);
+        return;
+    }
+    if (event.key === "Enter") {
+        event.preventDefault();
+        if (animating) return;
+        if (keyboardNav.menuOpen) {
+            confirmKeyboardMenuAction();
+        } else if (holdingMyDraw() && state.pending_draw.source === "draw") {
+            playDrawn();
+        } else if (holdingMyDraw()) {
+            showToast("A discard pickup must be switched into your grid. Choose a card and press Space.");
+        } else if (canChooseNow()) {
+            keyboardNav.menuOpen = true;
+            normalizeKeyboardMenuIndex();
+            renderKeyboardActionMenu();
+        } else {
+            showToast("The action menu opens at the start of your turn.");
+        }
+    }
 }
 
 function playerIsHolding(sid) {
@@ -667,13 +1115,17 @@ function shortestDeg(deg) {
     return ((((deg + 180) % 360) + 360) % 360) - 180;
 }
 
-function applyTableCameraSettings() {
+function applyTableCameraSettings(force = false) {
     const table3d = document.querySelector(".table-3d");
     const stage = document.querySelector(".table-stage");
     if (!table3d || !stage) return null;
 
-    const stageWidth = Math.max(320, stage.clientWidth);
-    const stageHeight = Math.max(420, stage.clientHeight);
+    const measuredWidth = stage.clientWidth;
+    const measuredHeight = stage.clientHeight;
+    if (measuredWidth < 8 || measuredHeight < 8) return null;
+    if (!force && tableCameraCache) return tableCameraCache;
+    const stageWidth = Math.max(320, measuredWidth);
+    const stageHeight = Math.max(420, measuredHeight);
     const topClearance = stageWidth < 700 ? 34 : 42;
     const legReserve = stageWidth < 700 ? 74 : 122;
     const l = TABLE.cameraLength;
@@ -702,6 +1154,7 @@ function applyTableCameraSettings() {
         "--card-gap": `${gap.toFixed(3)}px`,
         "--grid-width-2": `${(cardWidth * 2 + gap).toFixed(3)}px`,
         "--grid-width-3": `${(cardWidth * 3 + gap * 2).toFixed(3)}px`,
+        "--grid-width-4": `${(cardWidth * 4 + gap * 3).toFixed(3)}px`,
         "--pile-world-y": `${(TABLE.pileY * scale).toFixed(3)}px`,
     };
     const handLayer = document.querySelector(".hand-overlays");
@@ -713,7 +1166,8 @@ function applyTableCameraSettings() {
     table3d.dataset.cameraLength = l.toFixed(4);
     table3d.dataset.projectedNearFarRatio = ((l * l + d * b) / (l * l - d * b)).toFixed(4);
     requestAnimationFrame(layoutTableLegs);
-    return { scale, centerY };
+    tableCameraCache = { scale, centerY };
+    return tableCameraCache;
 }
 
 function projectWorldPoint(x, y) {
@@ -736,7 +1190,9 @@ function projectWorldPoint(x, y) {
  * Uses clientWidth/Height (unprojected), never getBoundingClientRect().
  */
 function gridColsForBoard(boardLength) {
-    return boardLength <= 4 ? 2 : Math.min(3, Math.ceil(boardLength / 2));
+    const configured = Number(state?.settings?.grid_cols);
+    if (configured >= 2 && configured <= 4) return configured;
+    return boardLength <= 4 ? 2 : Math.min(4, Math.ceil(Math.sqrt(boardLength)));
 }
 
 function seatDensityScale(count) {
@@ -754,6 +1210,13 @@ function boardShape(sid) {
     const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
     const boardHeight = rows * TABLE.cardHeight + (rows - 1) * TABLE.cardGap;
     return { boardLength, cols, rows, boardWidth, boardHeight };
+}
+
+function heldPlacementFor(sid) {
+    const shape = boardShape(sid);
+    const crowdedTable = (state?.player_order?.length || 0) >= 5;
+    const narrowScreen = window.innerWidth < 760;
+    return shape.cols >= 4 || crowdedTable || narrowScreen ? "below" : "side";
 }
 
 function boardGrowthScale(sid) {
@@ -1036,7 +1499,13 @@ function seatLayout(order) {
 function renderSeats(options = {}) {
     applyTableCameraSettings();
     const order = rotatedOrder();
-    const positions = seatLayout(order);
+    const layoutKey = order.map((sid) => (
+        `${sid}:${state.players[sid]?.board?.length || 0}`
+    )).join("|");
+    if (seatLayoutCache.key !== layoutKey) {
+        seatLayoutCache = { key: layoutKey, positions: seatLayout(order) };
+    }
+    const positions = seatLayoutCache.positions;
     els.seats.innerHTML = order
         .map((sid, index) => renderSeat(sid, positions[index], options))
         .join("");
@@ -1052,7 +1521,9 @@ function renderSeats(options = {}) {
 
 function renderHands(order, options = {}) {
     if (!els.hands) return;
-    els.hands.innerHTML = order.filter((sid) => !state.players[sid]?.is_bot).map((sid) => {
+    els.hands.innerHTML = order.filter((sid) => (
+        !state.players[sid]?.is_bot && !state.players[sid]?.eliminated
+    )).map((sid) => {
         const hideHeld = options.hideAnimTargets && options.action
             && (options.action.type === "draw" || options.action.type === "take")
             && options.action.sid === sid;
@@ -1084,14 +1555,6 @@ function layoutHands(order) {
         const handYaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
         hand.style.setProperty("--hand-yaw", `${handYaw.toFixed(2)}deg`);
         hand.style.setProperty("--hand-depth-scale", depthScale.toFixed(4));
-        const heldCard = hand.querySelector("[data-held-card]");
-        if (heldCard) {
-            const rect = heldCard.getBoundingClientRect();
-            left += layerRect.left + left - (rect.left + rect.right) / 2;
-            top += layerRect.top + top - (rect.top + rect.bottom) / 2;
-            hand.style.left = `${left.toFixed(2)}px`;
-            hand.style.top = `${top.toFixed(2)}px`;
-        }
     });
 }
 
@@ -1108,11 +1571,15 @@ function renderNameplates(order, positions) {
         if (isMe) classes.push("me");
         if (player.protected) classes.push("protected");
         if (sid === state.current_turn_sid) classes.push("current-turn");
+        if (sid === keyboardNav.ownerSid) classes.push("keyboard-target");
+        const keyboardNumber = keyboardPlayerOrder().indexOf(sid) + 1;
         const badges = [
+            keyboardNumber > 0 ? `<span class="badge key-badge">${keyboardNumber}</span>` : "",
             player.called ? `<span class="badge yellow">CALLED</span>` : "",
-            player.protected ? `<span class="badge yellow">SAFE</span>` : "",
+            player.protected && !player.called ? `<span class="badge yellow">SAFE</span>` : "",
             `<span class="badge blue turn-badge${sid === state.current_turn_sid ? "" : " is-off"}">TURN</span>`,
             player.is_bot ? `<span class="badge green">BOT</span>` : "",
+            player.eliminated ? `<span class="badge red">SPECTATING</span>` : "",
             !player.connected ? `<span class="badge">OFF</span>` : "",
         ].join("");
         return `
@@ -1284,7 +1751,9 @@ function renderSeat(sid, position, options = {}) {
     const classes = ["seat"];
     if (isMe) classes.push("me");
     if (player.protected) classes.push("protected");
+    if (player.eliminated) classes.push("spectator-seat");
     if (sid === state.current_turn_sid) classes.push("current-turn");
+    if (sid === keyboardNav.ownerSid) classes.push("keyboard-target");
 
     const hideSlot = options.hideAnimTargets && options.action
         && options.action.type === "swap"
@@ -1353,7 +1822,7 @@ function renderSeat(sid, position, options = {}) {
         <section class="${classes.join(" ")}" style="${style}" data-sid="${sid}">
             <div class="seat-scale">
                 <div class="seat-board">
-                    <div class="card-grid cols-${cols}" data-grid="${sid}">${cards}</div>
+                    <div class="card-grid cols-${cols}" data-grid="${sid}" style="grid-template-columns:repeat(${cols}, 1fr)">${cards}</div>
                     ${botHeld}
                 </div>
             </div>
@@ -1366,9 +1835,10 @@ function renderBotHeldSlot(sid, options = {}) {
     const peek = state.held_peek?.sid === sid ? state.held_peek : null;
     if (!holding && !peek) return "";
     const hiddenClass = options.hidden ? " anim-hidden" : "";
+    const placement = heldPlacementFor(sid);
     return `
         <div
-            class="bot-held-slot${hiddenClass}"
+            class="bot-held-slot held-${placement}${hiddenClass}"
             data-held="${sid}"
             style="--held-card-tilt:${TABLE.heldCardTilt}deg"
         >
@@ -1382,11 +1852,12 @@ function renderHeldSlot(sid, options = {}) {
     const isBot = Boolean(state.players[sid]?.is_bot);
     const holding = playerIsHolding(sid);
     const peek = state.held_peek?.sid === sid ? state.held_peek : null;
+    const placement = heldPlacementFor(sid);
 
     // Local player always shows a distinct hand tray to the left of the grid.
     if (!holding && !peek) {
         if (isMe) {
-            return `<div class="held-slot hand-tray empty-tray" data-held="${sid}"><span class="hand-label">hand</span></div>`;
+            return `<div class="held-slot held-${placement} hand-tray empty-tray" data-held="${sid}"><span class="hand-label">hand</span></div>`;
         }
         return `<div class="held-slot empty" data-held="${sid}" aria-hidden="true"></div>`;
     }
@@ -1413,7 +1884,7 @@ function renderHeldSlot(sid, options = {}) {
     const hiddenClass = options.hidden ? " anim-hidden" : "";
     const trayClass = isMe ? " hand-tray" : "";
     return `
-        <div class="held-slot filled${trayClass}${isBot ? " bot-hand" : ""}${hiddenClass}" data-held="${sid}">
+        <div class="held-slot held-${placement} filled${trayClass}${isBot ? " bot-hand" : ""}${hiddenClass}" data-held="${sid}">
             ${isMe ? `<span class="hand-label">hand</span>` : ""}
             ${inner}
             ${actions}
@@ -1463,6 +1934,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     if (looked) classes.push("looked-mark");
     if (switched) classes.push("switched-mark");
     if (opening) classes.push("opening-peek");
+    if (ownerSid === keyboardNav.ownerSid && index === keyboardNav.index) classes.push("keyboard-focus");
     if (options.hidden) classes.push("anim-hidden");
     if (isClickable(ownerSid, index, slot) || opening) classes.push("selectable");
 
@@ -1474,10 +1946,10 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
 }
 
 function canOpeningPeek(ownerSid, index, slot) {
-    if (ownerSid !== mySid || slot.empty || slot.faceUp) return false;
+    if (slot.empty || slot.faceUp) return false;
     const me = state.players[mySid];
     if (!me?.opening_peekable) return false;
-    return index === 2 || index === 3;
+    return Boolean(slot.openingPeekable);
 }
 
 function shouldHighlightSlot(ownerSid, index) {
@@ -1492,7 +1964,7 @@ function shouldHighlightSlot(ownerSid, index) {
 
 function isClickable(ownerSid, index, slot) {
     if (slot.empty || animating) return false;
-    if (state.players[mySid]?.called) return false;
+    if (state.players[mySid]?.called || state.players[mySid]?.eliminated) return false;
 
     if (canOpeningPeek(ownerSid, index, slot)) return true;
 
@@ -1540,6 +2012,10 @@ function isSelectedByAbility(ownerSid, index) {
 
 function cardClicked(ownerSid, index) {
     if (!state || animating) return;
+    if (state.players[mySid]?.eliminated) {
+        showToast("You are spectating this game.");
+        return;
+    }
     if (state.players[mySid]?.called) {
         showToast("You already called and cannot take any more actions this round.");
         return;
@@ -1547,7 +2023,7 @@ function cardClicked(ownerSid, index) {
 
     const slot = state.players[ownerSid]?.board?.[index];
     if (slot && canOpeningPeek(ownerSid, index, slot)) {
-        socket.emit("peek_opening", { room: ROOM_ID, index });
+        socket.emit("peek_opening", { room: ROOM_ID, owner_sid: ownerSid, index });
         return;
     }
 
@@ -1589,7 +2065,12 @@ function cardClicked(ownerSid, index) {
             showToast("That discard has already had a card burned on it.");
             return;
         }
-        socket.emit("burn_card", { room: ROOM_ID, owner_sid: ownerSid, index });
+        socket.emit("burn_card", {
+            room: ROOM_ID,
+            owner_sid: ownerSid,
+            index,
+            discard_id: state.discard_top?.id || null,
+        });
         return;
     }
 
@@ -1844,8 +2325,10 @@ function renderHint() {
         text = spectatorAbilityNote();
     } else if (state.pending_ability?.sid === mySid && state.phase === "ability" && state.pending_ability.stage === "selecting") {
         text = "Click a board card for the ability.";
+    } else if (state.players[mySid]?.eliminated) {
+        text = "You busted and are spectating the remaining players.";
     } else if (state.players[mySid]?.opening_peekable) {
-        text = "Click your two bottom cards to peek, then draw when ready.";
+        text = "Click any highlighted opening-peek cards, then draw when ready.";
     } else if (holdingMyDraw()) {
         const card = state.pending_draw.card;
         if (card?.ability && state.pending_draw.source === "draw") {
@@ -1872,17 +2355,20 @@ function renderRoundOverHtml() {
         : "";
     const rows = state.player_order.map((sid) => {
         const player = state.players[sid];
+        const hasRoundScore = state.round_results?.raw_scores?.[sid] != null;
         const raw = state.round_results?.raw_scores?.[sid] ?? 0;
         const round = state.round_results?.round_scores?.[sid] ?? 0;
-        return `<div class="result-row"><span>${escapeHtml(player.username)}</span><strong>hand ${raw} / +${round}</strong></div>`;
+        const result = hasRoundScore ? `hand ${raw} / +${round}` : "spectating";
+        const busted = (state.round_results?.eliminated || []).includes(sid) ? " · BUST" : "";
+        return `<div class="result-row ${player.eliminated ? "eliminated" : ""}"><span>${escapeHtml(player.username)}</span><strong>${result}${busted}</strong></div>`;
     }).join("");
-    const loserText = state.status === "game_over" && state.winner_summary
-        ? `<p>${state.winner_summary.losers.map((sid) => escapeHtml(state.players[sid].username)).join(", ")} hit ${state.winner_summary.target_score}+ and loses.</p>`
+    const winnerText = state.status === "game_over" && state.winner_summary
+        ? `<p>${state.winner_summary.winners.map((sid) => escapeHtml(state.players[sid].username)).join(", ")} ${state.winner_summary.winners.length === 1 ? "wins" : "win"}.</p>`
         : `<p>${escapeHtml(state.players[state.round_results?.next_start_sid]?.username || "Next")} starts next.</p>`;
     return `
         <div class="overlay-card">
             <h2>${state.status === "game_over" ? "Game over" : "Round over"}</h2>
-            ${loserText}
+            ${winnerText}
             ${rows}
             <div class="panel-actions">${hostButton}</div>
         </div>
@@ -1980,23 +2466,74 @@ function heldWorldAnchor(sid) {
     const rows = Math.max(1, Math.ceil(boardLength / cols));
     const boardWidth = cols * TABLE.cardWidth + (cols - 1) * TABLE.cardGap;
     const boardHeight = rows * TABLE.cardHeight + (rows - 1) * TABLE.cardGap;
-    if (state.players[sid]?.is_bot) {
-        const localY = (
-            boardHeight / 2
-            + TABLE.heldCardGap
-            - TABLE.cardHeight / 2
-        ) * frame.scale;
-        return worldFromSeatLocal(
-            frame,
-            0,
-            localY,
-            TABLE.heldCardTilt,
-        );
-    }
-    const localX = -(boardWidth / 2 + 0.14 + TABLE.cardWidth / 2) * frame.scale;
-    const anchor = worldFromSeatLocal(frame, localX, 0, -TABLE.pitch * 180 / Math.PI);
-    anchor.yaw = uprightHandYaw(frame.yaw);
+    const placement = heldPlacementFor(sid);
+    const localX = placement === "side"
+        ? -(boardWidth / 2 + 0.14 + TABLE.cardWidth / 2) * frame.scale
+        : 0;
+    const localY = placement === "below"
+        ? (boardHeight / 2 + TABLE.heldCardGap + TABLE.cardHeight / 2) * frame.scale
+        : 0;
+    const isBot = state.players[sid]?.is_bot;
+    const anchor = worldFromSeatLocal(
+        frame,
+        localX,
+        localY,
+        isBot ? TABLE.heldCardTilt : -TABLE.pitch * 180 / Math.PI,
+    );
+    if (!isBot) anchor.yaw = uprightHandYaw(frame.yaw);
     return anchor;
+}
+
+function burnShowdownHtml(showdown) {
+    const attempts = (showdown.attempts || [])
+        .slice()
+        .sort((a, b) => a.time_ms - b.time_ms);
+    const rows = attempts.map((attempt, index) => {
+        const name = state.players[attempt.sid]?.username || "Player";
+        let result = "Attempt";
+        if (attempt.sid === showdown.winner_sid) result = "Burn landed";
+        else if (attempt.result === "late") result = "Too late · penalty";
+        else if (attempt.result === "miss") result = "Missed · penalty";
+        const seconds = (Math.max(0, attempt.time_ms) / 1000).toFixed(2);
+        return `
+            <div class="burn-showdown-row ${attempt.sid === showdown.winner_sid ? "winner" : "loser"}" style="--race-order:${index}">
+                <span class="burn-showdown-place">${index + 1}</span>
+                <span class="burn-showdown-player"><strong>${escapeHtml(name)}</strong><small>${result}</small></span>
+                <b>${seconds}s</b>
+            </div>
+        `;
+    }).join("");
+    const card = showdown.discard_card?.label || "discard";
+    const winnerAttempt = attempts.find((attempt) => attempt.sid === showdown.winner_sid);
+    const winnerName = state.players[showdown.winner_sid]?.username || "Player";
+    const winningSeconds = (Math.max(0, winnerAttempt?.time_ms || 0) / 1000).toFixed(2);
+    return `
+        <div class="burn-showdown-card">
+            <div class="burn-impact" aria-hidden="true">BURN!</div>
+            <div class="burn-showdown-kicker">REACTION SHOWDOWN · ${escapeHtml(card)}</div>
+            <h2><span>${escapeHtml(winnerName)}</span> struck first</h2>
+            <div class="burn-winning-time">${winningSeconds}<small>SECONDS</small></div>
+            <div class="burn-showdown-list">${rows}</div>
+        </div>
+    `;
+}
+
+function renderBurnShowdown() {
+    if (!els.burnShowdown || !state?.burn_showdown) return;
+    const showdown = state.burn_showdown;
+    if (showdown.id === lastBurnShowdownId) {
+        if (!els.burnShowdown.classList.contains("hidden")) {
+            els.burnShowdown.innerHTML = burnShowdownHtml(showdown);
+        }
+        return;
+    }
+    lastBurnShowdownId = showdown.id;
+    els.burnShowdown.innerHTML = burnShowdownHtml(showdown);
+    els.burnShowdown.classList.remove("hidden");
+    if (burnShowdownTimer) window.clearTimeout(burnShowdownTimer);
+    burnShowdownTimer = window.setTimeout(() => {
+        els.burnShowdown.classList.add("hidden");
+    }, 6000);
 }
 
 function captureAnchors() {
@@ -2399,7 +2936,12 @@ function burnFromPeek() {
 }
 
 function burnCard(ownerSid, index) {
-    socket.emit("burn_card", { room: ROOM_ID, owner_sid: ownerSid, index });
+    socket.emit("burn_card", {
+        room: ROOM_ID,
+        owner_sid: ownerSid,
+        index,
+        discard_id: state?.discard_top?.id || null,
+    });
 }
 
 function skipAbility() {

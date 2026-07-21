@@ -1,17 +1,28 @@
 SHMAMALE RULES
 ==============
 
-1. Goal
--------
+1. Goal And Room Settings
+------------------------
 
 Shmamale is a low-score card game played over multiple rounds.
 
 - Each player has a running score that starts at 0.
 - After each round, each player's round points are added to their score.
-- The default target score is 50.
-- The first player or players to reach or pass the target score lose.
-- If multiple players are over the target, the loser is the over-target player
-  with the highest score.
+- Lower scores are better.
+
+The host chooses the room rules before the game starts. The settings are shown
+in this order:
+
+1. Points: the score at which a player busts. The default is 50.
+2. Win condition: Last Player Standing (default), or Lowest When First Player
+   Busts.
+3. Grid: any rectangular grid from 2 by 2 through 4 by 4.
+4. Decks: 1 through 4 decks shuffled together. The default is 1.
+5. Joker value: -2 (default) or 0.
+
+The Default preset uses 50 points, Last Player Standing, a 2 by 2 grid with the
+bottom two cards available for a private self-peek, one deck, and jokers worth
+-2.
 
 
 2. Cards And Values
@@ -21,7 +32,7 @@ The deck uses standard playing cards plus jokers.
 
 Card values:
 
-- Joker: -2
+- Joker: -2 or 0, as selected by the host
 - Red King: -1
 - Ace: 1
 - 2 through 10: face value
@@ -35,9 +46,10 @@ Lower totals are better.
 3. Player Boards
 ----------------
 
-- Each player starts each round with four face-down cards in a 2 by 2 board.
-- Slot 1 and slot 2 are the top row.
-- Slot 3 and slot 4 are the bottom row.
+- Each active player starts the round with one face-down card in every grid
+  position chosen by the host.
+- The grid can have 2, 3, or 4 rows and 2, 3, or 4 columns. Rectangular grids
+  such as 3 by 2 are allowed.
 - Empty slots count as 0 points.
 - Penalty cards can add extra slots if a player has no empty slot available.
 
@@ -48,7 +60,8 @@ Lower totals are better.
 At the start of each round:
 
 1. Shuffle the deck.
-2. Deal four face-down cards to each player.
+2. Deal one face-down card into every configured grid position for each active
+   player.
 3. Place the remaining cards face down as the draw pile.
 4. Start with an empty discard pile.
 5. Clear calls, protection, burns, pending actions, and temporary peeks.
@@ -56,9 +69,14 @@ At the start of each round:
 Opening peek:
 
 - Before taking their first turn action of the round, a player may privately
-  peek at their two bottom cards.
-- The opening peek only applies to the bottom row.
-- Once that player draws, takes the discard, or calls, their opening peek ends.
+  inspect only the grid positions allowed by the room's peek rules.
+- Each grid position has exactly one rule: peek at your own card, peek at that
+  position on every opponent, peek at that position on the selected opponent a
+  chosen number of seats to the left or right, or no opening peek.
+- Selecting a new peek rule for a position replaces its old rule. Selecting the
+  same rule again clears it.
+- Once a player draws, takes the discard, or calls, all of that player's opening
+  peeks end.
 
 
 5. Turn Choices
@@ -182,10 +200,19 @@ Successful burn, opponent's card:
 
 Failed burn:
 
-- The revealed card stays on the board face up.
+- The revealed card stays face up for the rest of the current turn and the
+  whole following player's turn, then flips face down again.
 - You take a penalty card from the draw pile.
 - The penalty goes into your first empty slot, or into a new extra slot if your
   board is full.
+
+Burn showdown:
+
+- Multiple players may commit a burn against the same discard before the first
+  result reaches them.
+- The earliest valid matching burn wins.
+- Later committed attempts lose the showdown and take a failed-burn penalty.
+- The showdown displays each attempt's reaction time and finishing order.
 
 You cannot burn a card that was just placed from taking the discard until a new
 discard top is created.
@@ -230,11 +257,19 @@ first caller is tied for lowest, prefer another tied low player to start.
 12. Game End
 ------------
 
-After scoring a round:
+Last Player Standing (default):
 
-- If no player has reached the target score, play another round.
-- If one or more players have reached or passed the target score, the game ends.
-- Among the players at or over the target, the highest score loses.
+- Any player who reaches or passes the target after a round is eliminated.
+- Eliminated players become spectators and can watch the remaining rounds.
+- The game continues until one player remains. That player wins.
+- If every remaining player busts in the same round, the player or players with
+  the lowest running score win.
+
+Lowest When First Player Busts:
+
+- The game ends after the first round in which anyone reaches or passes the
+  target.
+- The player or players with the lowest running score win.
 
 
 13. Quick Reference

@@ -1,4 +1,5 @@
 import random
+import time
 
 
 SUITS = {
@@ -11,6 +12,10 @@ SUITS = {
 RANKS = ["A", "2", "3", "4", "5", "6", "7", "8", "9", "10", "J", "Q", "K"]
 BOARD_SIZE = 4
 BOTTOM_ROW = {2, 3}
+MIN_GRID_SIZE = 2
+MAX_GRID_SIZE = 4
+PEEK_MODES = {"none", "self", "all_opponents", "seat_opponent"}
+WIN_CONDITIONS = {"first_bust_lowest", "last_standing"}
 
 
 def card_value(rank, color=None):
@@ -42,7 +47,7 @@ def card_ability(card):
     return None
 
 
-def make_card(rank, suit=None, deck_number=1, joker_number=None):
+def make_card(rank, suit=None, deck_number=1, joker_number=None, joker_value=-2):
     if rank == "JOKER":
         card_id = f"D{deck_number}-JOKER-{joker_number}"
         return {
@@ -55,7 +60,7 @@ def make_card(rank, suit=None, deck_number=1, joker_number=None):
             "label": "Joker",
             "short": "Joker",
             "face": "Joker",
-            "value": -2,
+            "value": joker_value,
             "burn_key": "JOKER",
             "ability": None,
         }
@@ -81,14 +86,21 @@ def make_card(rank, suit=None, deck_number=1, joker_number=None):
     return card
 
 
-def build_deck(deck_count=1, jokers=2):
+def build_deck(deck_count=1, jokers=2, joker_value=-2):
     deck = []
     for deck_number in range(1, deck_count + 1):
         for suit in SUITS:
             for rank in RANKS:
                 deck.append(make_card(rank, suit=suit, deck_number=deck_number))
         for joker_number in range(1, jokers + 1):
-            deck.append(make_card("JOKER", deck_number=deck_number, joker_number=joker_number))
+            deck.append(
+                make_card(
+                    "JOKER",
+                    deck_number=deck_number,
+                    joker_number=joker_number,
+                    joker_value=joker_value,
+                )
+            )
     random.shuffle(deck)
     return deck
 
@@ -97,12 +109,12 @@ def make_slot(card):
     return {"card": card, "revealed": False}
 
 
-def empty_board():
-    return [None for _ in range(BOARD_SIZE)]
+def empty_board(board_size=BOARD_SIZE):
+    return [None for _ in range(board_size)]
 
 
-def deal_board(deck):
-    return [make_slot(deck.pop()) for _ in range(BOARD_SIZE)]
+def deal_board(deck, board_size=BOARD_SIZE):
+    return [make_slot(deck.pop()) for _ in range(board_size)]
 
 
 def public_card(card):
@@ -156,12 +168,41 @@ def ability_label(ability):
 
 def default_settings():
     return {
+        "preset": "default",
         "target_score": 50,
+        "win_condition": "last_standing",
+        "grid_rows": 2,
+        "grid_cols": 2,
+        "grid_peek_modes": ["none", "none", "self", "self"],
+        "opponent_peek_distance": 1,
+        "opponent_peek_direction": "left",
+        "joker_value": -2,
         "deck_count": 1,
         "jokers": 2,
-        "bot_count": 0,
-        "bot_difficulty": "medium",
     }
+
+
+def clamp_grid_dimension(value, fallback=2):
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        value = fallback
+    return max(MIN_GRID_SIZE, min(MAX_GRID_SIZE, value))
+
+
+def normalized_grid_modes(raw_modes, rows, cols):
+    size = rows * cols
+    modes = list(raw_modes) if isinstance(raw_modes, (list, tuple)) else []
+    return [
+        modes[index] if index < len(modes) and modes[index] in PEEK_MODES else "none"
+        for index in range(size)
+    ]
+
+
+def board_size_from_settings(settings):
+    rows = clamp_grid_dimension(settings.get("grid_rows", 2))
+    cols = clamp_grid_dimension(settings.get("grid_cols", 2))
+    return rows * cols
 
 
 def new_room(host_sid):
@@ -189,12 +230,21 @@ def new_room(host_sid):
         "winner_summary": None,
         "action_log": [],
         "bot_mode": False,
+        "bot_match_log": [],
         "bot_scheduled_key": None,
-        "bot_burn_checked_card_id": None,
+        "bot_burn_checked": set(),
+        "bot_burn_pending": set(),
+        "burn_knowledge_epoch": 0,
         "discard_epoch": 0,
+        "burn_window_started_at": None,
+        "burn_window_card_id": None,
+        "burn_contests": {},
+        "burn_showdown": None,
+        "burn_showdown_sequence": 0,
         "burn_locked_discard_ids": set(),
         "burnt_slots": [],
         "burn_blockers": [],
+        "failed_burn_reveals": [],
         "action_sequence": 0,
         "last_action": None,
     }
@@ -218,6 +268,15 @@ def make_player(username, is_bot=False, difficulty=None, bot_policy=None):
         "is_bot": is_bot,
         "difficulty": difficulty or "",
         "bot_policy": bot_policy or {},
+        "bot_known_cards": {},
+        "bot_telemetry": {
+            "decisions": 0,
+            "rounds": [],
+            "events": [],
+        },
+        "eliminated": False,
+        "spectating": False,
+        "eliminated_round": None,
     }
 
 
@@ -239,7 +298,13 @@ def reset_discard_burn_state(game):
     game["discard_epoch"] = game.get("discard_epoch", 0) + 1
     game["burnt_slots"] = []
     game["burn_blockers"] = []
-    game["bot_burn_checked_card_id"] = None
+    game["bot_burn_checked"] = set()
+    game["bot_burn_pending"] = set()
+    game["burn_knowledge_epoch"] = 0
+    game["burn_window_started_at"] = time.time()
+    game["burn_window_card_id"] = (
+        game["discard_pile"][-1]["id"] if game.get("discard_pile") else None
+    )
 
 
 def burn_locked_discard_ids(game):
@@ -367,11 +432,56 @@ def can_attempt_burn(game, burner_sid):
 def current_sid(game):
     if not game["player_order"]:
         return None
-    return game["player_order"][game["turn_index"] % len(game["player_order"])]
+    sid = game["player_order"][game["turn_index"] % len(game["player_order"])]
+    player = game["players"].get(sid)
+    return sid if player and not player.get("eliminated") else None
 
 
 def live_player_sids(game):
     return [sid for sid in game["player_order"] if sid in game["players"]]
+
+
+def active_player_sids(game):
+    return [
+        sid
+        for sid in game["player_order"]
+        if sid in game["players"] and not game["players"][sid].get("eliminated")
+    ]
+
+
+def seat_opponent_sid(game, viewer_sid):
+    order = active_player_sids(game)
+    if viewer_sid not in order or len(order) < 2:
+        return None
+    settings = game["settings"]
+    distance = max(1, min(len(order) - 1, int(settings.get("opponent_peek_distance", 1))))
+    direction = -1 if settings.get("opponent_peek_direction") == "left" else 1
+    return order[(order.index(viewer_sid) + direction * distance) % len(order)]
+
+
+def can_opening_peek_slot(game, viewer_sid, owner_sid, index):
+    viewer = game["players"].get(viewer_sid)
+    owner = game["players"].get(owner_sid)
+    if (
+        not viewer
+        or not owner
+        or viewer.get("eliminated")
+        or owner.get("eliminated")
+        or viewer.get("first_turn_started")
+        or game.get("status") != "playing"
+    ):
+        return False
+    modes = game["settings"].get("grid_peek_modes", [])
+    if index < 0 or index >= len(modes):
+        return False
+    mode = modes[index]
+    if mode == "self":
+        return viewer_sid == owner_sid
+    if mode == "all_opponents":
+        return viewer_sid != owner_sid
+    if mode == "seat_opponent":
+        return owner_sid == seat_opponent_sid(game, viewer_sid)
+    return False
 
 
 def slot_at(game, owner_sid, index):
@@ -396,7 +506,7 @@ def live_slots_for(game, sid):
 
 def all_switchable_slots(game, actor_sid):
     slots = []
-    for owner_sid in game["player_order"]:
+    for owner_sid in active_player_sids(game):
         if owner_sid not in game["players"]:
             continue
         if protected_from_switch(game, actor_sid, owner_sid):

@@ -7,29 +7,124 @@
 <div id="toast" class="toast"></div>
 <div id="conn-banner" class="conn-banner hidden"></div>
 
-<section id="lobby" class="lobby-card">
-    <h1>WAITING ROOM</h1>
-    <div class="room-code">CODE <strong>{{ room_id }}</strong></div>
-
-    <div id="host-controls" class="host-controls hidden">
-        <h3>HOST SETTINGS</h3>
-        <label>
-            Losing score
-            <input id="setting-target" type="number" min="10" max="500" value="50">
-        </label>
-        <label>
-            Decks
-            <input id="setting-decks" type="number" min="1" max="4" value="1">
-        </label>
-        <label>
-            Jokers per deck
-            <input id="setting-jokers" type="number" min="0" max="8" value="2">
-        </label>
+<section id="lobby" class="lobby-card lobby-card-wide">
+    <div class="lobby-heading">
+        <div>
+            <div class="eyebrow">PLAY ROOM</div>
+            <h1>WAITING ROOM</h1>
+        </div>
+        <div class="room-code">INVITE CODE <strong>{{ room_id }}</strong></div>
     </div>
 
-    <div class="lobby-list">
-        <h3>PLAYERS</h3>
-        <div id="player-list"></div>
+    <div class="lobby-columns">
+        <div id="host-controls" class="room-settings">
+            <div class="settings-heading">
+                <div>
+                    <span class="eyebrow">GAME RULES</span>
+                    <h2>Room settings</h2>
+                </div>
+                <label class="preset-control">
+                    Preset
+                    <select id="setting-preset">
+                        <option value="default">Default</option>
+                        <option value="custom">Custom</option>
+                    </select>
+                </label>
+            </div>
+
+            <label class="setting-row">
+                <span><strong>Points</strong><small>Score at which a player busts</small></span>
+                <input id="setting-target" type="number" min="10" max="500" value="50">
+            </label>
+
+            <label class="setting-row">
+                <span><strong>Win condition</strong><small>How the room decides a winner</small></span>
+                <select id="setting-win-condition">
+                    <option value="last_standing">Last player standing</option>
+                    <option value="first_bust_lowest">Lowest when first player busts</option>
+                </select>
+            </label>
+
+            <section class="grid-setting-card">
+                <div class="grid-setting-title">
+                    <span><strong>Grid</strong><small>Build a board from 2×2 up to 4×4</small></span>
+                    <div class="grid-dimensions">
+                        <select id="setting-grid-cols" aria-label="Grid columns">
+                            <option value="2">2 columns</option>
+                            <option value="3">3 columns</option>
+                            <option value="4">4 columns</option>
+                        </select>
+                        <span>×</span>
+                        <select id="setting-grid-rows" aria-label="Grid rows">
+                            <option value="2">2 rows</option>
+                            <option value="3">3 rows</option>
+                            <option value="4">4 rows</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="peek-tool-label">Choose a peek type, then paint cards</div>
+                <div id="peek-mode-tools" class="peek-mode-tools">
+                    <button type="button" class="peek-tool active" data-peek-mode="self">
+                        <span class="peek-dot self"></span> Peek your own
+                    </button>
+                    <button type="button" class="peek-tool" data-peek-mode="all_opponents">
+                        <span class="peek-dot all"></span> All opponents
+                    </button>
+                    <button type="button" class="peek-tool" data-peek-mode="seat_opponent">
+                        <span class="peek-dot chosen"></span> Chosen opponent
+                    </button>
+                </div>
+
+                <div id="seat-peek-controls" class="seat-peek-controls">
+                    <span>Chosen opponent is</span>
+                    <select id="setting-peek-distance" aria-label="Opponent seat distance">
+                        <option value="1">1 seat</option>
+                        <option value="2">2 seats</option>
+                        <option value="3">3 seats</option>
+                        <option value="4">4 seats</option>
+                        <option value="5">5 seats</option>
+                    </select>
+                    <select id="setting-peek-direction" aria-label="Opponent seat direction">
+                        <option value="left">to the left</option>
+                        <option value="right">to the right</option>
+                    </select>
+                </div>
+
+                <div id="grid-rule-editor" class="grid-rule-editor" aria-label="Card grid peek editor"></div>
+                <div class="grid-rule-hint">Clicking a card with the active type again clears it. Choosing another type replaces it.</div>
+            </section>
+
+            <label class="setting-row">
+                <span><strong>Decks</strong><small>Number of decks shuffled together</small></span>
+                <select id="setting-deck-count">
+                    <option value="1">1 deck</option>
+                    <option value="2">2 decks</option>
+                    <option value="3">3 decks</option>
+                    <option value="4">4 decks</option>
+                </select>
+            </label>
+
+            <label class="setting-row">
+                <span><strong>Joker value</strong><small>Bots account for the selected value</small></span>
+                <select id="setting-joker-value">
+                    <option value="-2">−2 points</option>
+                    <option value="0">0 points</option>
+                </select>
+            </label>
+        </div>
+
+        <div class="lobby-list roster-panel">
+            <div class="roster-heading">
+                <div>
+                    <span class="eyebrow">SEATS</span>
+                    <h2>Players & bots</h2>
+                </div>
+                <button id="add-bot-btn" type="button" class="btn btn-purple small-btn hidden">+ ADD BOT</button>
+            </div>
+            <div id="player-list"></div>
+            <p class="roster-note">Invite friends with the room code or fill open seats with bots.</p>
+        </div>
     </div>
 
     <div class="lobby-actions">
@@ -49,7 +144,10 @@
             </div>
             <div id="action-hint" class="action-hint"></div>
         </div>
-        <div class="room-pill">ROOM {{ room_id }}</div>
+        <div class="topbar-actions">
+            <button id="keybinds-btn" type="button" class="btn btn-gray small-btn">KEYS</button>
+            <div class="room-pill">ROOM {{ room_id }}</div>
+        </div>
     </header>
 
     <div class="play-area">
@@ -101,8 +199,38 @@
 
         <div id="fly-layer" class="fly-layer" aria-hidden="true"></div>
         <div id="ability-overlay" class="ability-overlay hidden"></div>
+        <div id="burn-showdown" class="burn-showdown hidden" aria-live="polite"></div>
+        <div id="keyboard-action-menu" class="keyboard-action-menu hidden" role="dialog" aria-label="Choose a turn action"></div>
     </div>
 </main>
+
+<div id="keybinds-overlay" class="modal-backdrop keybinds-overlay hidden" role="dialog" aria-modal="true" aria-labelledby="keybinds-title">
+    <section class="keybinds-card">
+        <div class="keybinds-heading">
+            <div>
+                <span class="eyebrow">KEYBOARD CONTROLS</span>
+                <h2 id="keybinds-title">Play without the mouse</h2>
+            </div>
+            <button id="keybinds-close" type="button" class="btn btn-red small-btn">CLOSE</button>
+        </div>
+        <div class="keybinds-grid">
+            <div><span><kbd>1</kbd>–<kbd>6</kbd></span><p>Select a player. <kbd>1</kbd> is always you.</p></div>
+            <div><span><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd></span><p>Move between cards.</p></div>
+            <div><span><kbd>↑</kbd><kbd>←</kbd><kbd>↓</kbd><kbd>→</kbd></span><p>Also move between cards or menu choices.</p></div>
+            <div><span><kbd>Space</kbd></span><p>Select the focused card or confirm a menu choice.</p></div>
+            <div><span><kbd>Enter</kbd></span><p>Open the turn menu. After a deck draw, play the held card.</p></div>
+            <div><span><kbd>Esc</kbd></span><p>Close the action menu or this guide.</p></div>
+            <div><span><kbd>K</kbd> / <kbd>?</kbd></span><p>Open this keybinds guide at any time.</p></div>
+        </div>
+        <div class="highlight-legend">
+            <strong>Highlight colors</strong>
+            <span><i class="legend-swatch keyboard"></i>Keyboard focus</span>
+            <span><i class="legend-swatch peek"></i>Opening peek</span>
+            <span><i class="legend-swatch looked"></i>Recently viewed</span>
+            <span><i class="legend-swatch switched"></i>Recently switched</span>
+        </div>
+    </section>
+</div>
 
 <script src="{{ url_for('static', filename='js/vendor/socket.io.min.js') }}"></script>
 <script src="{{ url_for('static', filename='js/shmamale.js') }}"></script>

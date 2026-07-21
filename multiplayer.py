@@ -5,22 +5,34 @@ from flask import request
 from flask_socketio import emit, join_room
 
 from extensions import socketio
-from bot import configure_bots, maybe_schedule_bot_work
+from bot import (
+    add_bot,
+    initialize_bot_round_knowledge,
+    maybe_schedule_bot_work,
+    remember_bot_card,
+    record_bot_round_outcomes,
+    set_bot_difficulty,
+)
 from game import (
-    BOTTOM_ROW,
+    WIN_CONDITIONS,
+    active_player_sids,
     add_burn_blocker,
     add_log,
     ability_label,
     build_deck,
     burn_matches,
-    can_attempt_burn,
+    board_size_from_settings,
+    can_opening_peek_slot,
     card_count,
+    clamp_grid_dimension,
     clear_burn_blockers,
     current_sid,
+    default_settings,
     deal_board,
     deal_penalty_card,
     discard_burned_card,
     discard_card,
+    empty_board,
     is_burn_blocked,
     is_bot_player,
     is_discard_burn_locked,
@@ -31,6 +43,7 @@ from game import (
     mark_slot_burnt,
     mark_turn_started,
     new_room,
+    normalized_grid_modes,
     player_name,
     protected_from_switch,
     public_card,
@@ -44,6 +57,7 @@ from game import (
 
 rooms = {}
 FINAL_COUNTDOWN_SECONDS = 3.0
+MAX_PLAYERS = 6
 
 def live_human_sids(game):
     return [
@@ -87,20 +101,44 @@ def visible_slot(game, viewer_sid, owner_sid, index, slot):
     if not slot or not slot.get("card"):
         return {"empty": True, "faceUp": True, "card": None}
 
-    owner = game["players"][owner_sid]
-    opening = owner.get("opening_peeked") or set()
+    viewer = game["players"].get(viewer_sid, {})
+    opening = viewer.get("opening_peeked") or set()
+    opening_key = f"{owner_sid}:{index}"
     should_show = (
         game["status"] in {"round_over", "game_over"}
         or slot.get("revealed", False)
         or (
-            viewer_sid == owner_sid
-            and not owner["first_turn_started"]
-            and index in opening
+            not viewer.get("first_turn_started")
+            and opening_key in opening
         )
     )
     if should_show:
-        return {"empty": False, "faceUp": True, "card": public_card(slot["card"])}
-    return {"empty": False, "faceUp": False, "card": None}
+        return {
+            "empty": False,
+            "faceUp": True,
+            "card": public_card(slot["card"]),
+            "openingPeekable": can_opening_peek_slot(
+                game, viewer_sid, owner_sid, index
+            ),
+        }
+    return {
+        "empty": False,
+        "faceUp": False,
+        "card": None,
+        "openingPeekable": can_opening_peek_slot(
+            game, viewer_sid, owner_sid, index
+        ),
+    }
+
+
+def has_opening_peek_available(game, viewer_sid):
+    if viewer_sid not in game["players"]:
+        return False
+    return any(
+        can_opening_peek_slot(game, viewer_sid, owner_sid, index)
+        for owner_sid in active_player_sids(game)
+        for index in range(len(game["players"][owner_sid]["board"]))
+    )
 
 
 def player_view(game, viewer_sid):
@@ -119,11 +157,13 @@ def player_view(game, viewer_sid):
             "called": player["called"],
             "protected": player["protected"],
             "connected": player["connected"],
+            "eliminated": player.get("eliminated", False),
+            "spectating": player.get("spectating", False),
+            "eliminated_round": player.get("eliminated_round"),
             "first_turn_started": player["first_turn_started"],
             "opening_peekable": (
                 sid == viewer_sid
-                and not player["first_turn_started"]
-                and game["status"] == "playing"
+                and has_opening_peek_available(game, viewer_sid)
             ),
             "card_count": card_count(player["board"]),
             "board": [
@@ -197,6 +237,7 @@ def player_view(game, viewer_sid):
         "round_number": game["round_number"],
         "players": players,
         "player_order": live_player_sids(game),
+        "active_player_order": active_player_sids(game),
         "host_sid": game["host_sid"],
         "viewer_sid": viewer_sid,
         "current_turn_sid": current_sid(game),
@@ -223,6 +264,7 @@ def player_view(game, viewer_sid):
         "final_countdown_ends_at": countdown_ends_at,
         "round_results": deepcopy(game["round_results"]),
         "winner_summary": deepcopy(game["winner_summary"]),
+        "burn_showdown": deepcopy(game.get("burn_showdown")),
         "action_log": list(game["action_log"]),
     }
 
@@ -292,13 +334,22 @@ def emit_error(message):
 
 
 def start_round(game):
+    active_sids = active_player_sids(game)
+    board_size = board_size_from_settings(game["settings"])
+    jokers = int(game["settings"].get("jokers", 2))
+    deck_count = max(1, min(4, int(game["settings"].get("deck_count", 1))))
     deck = build_deck(
-        deck_count=int(game["settings"]["deck_count"]),
-        jokers=int(game["settings"]["jokers"]),
+        deck_count=deck_count,
+        jokers=jokers,
+        joker_value=int(game["settings"].get("joker_value", -2)),
     )
     for sid in game["player_order"]:
         player = game["players"][sid]
-        player["board"] = deal_board(deck)
+        player["board"] = (
+            deal_board(deck, board_size)
+            if sid in active_sids
+            else empty_board(board_size)
+        )
         player["ready"] = False
         player["called"] = False
         player["protected"] = False
@@ -320,23 +371,60 @@ def start_round(game):
     game["winner_summary"] = None
     game["action_log"] = []
     game["discard_epoch"] = 0
+    game["burn_window_started_at"] = None
+    game["burn_window_card_id"] = None
+    game["burn_contests"] = {}
+    game["burn_showdown"] = None
     game["burn_locked_discard_ids"] = set()
     game["burnt_slots"] = []
     game["burn_blockers"] = []
+    game["failed_burn_reveals"] = []
     game["last_action"] = None
-    game["bot_burn_checked_card_id"] = None
+    game["bot_burn_checked"] = set()
+    game["bot_burn_pending"] = set()
+    game["burn_knowledge_epoch"] = 0
 
-    if game["next_start_sid"] in game["player_order"]:
+    if game["next_start_sid"] in active_sids:
         game["turn_index"] = game["player_order"].index(game["next_start_sid"])
     else:
-        game["turn_index"] = 0
+        game["turn_index"] = game["player_order"].index(active_sids[0]) if active_sids else 0
 
     game["status"] = "playing"
+    initialize_bot_round_knowledge(game)
     # Each player keeps their opening peek until they take their own first action.
     add_log(game, f"Round {game['round_number']} started. {player_name(game, current_sid(game))} goes first.")
 
 
+def expire_failed_burn_reveals(game):
+    remaining = []
+    for reveal in game.get("failed_burn_reveals", []):
+        reveal["turns_remaining"] -= 1
+        if reveal["turns_remaining"] > 0:
+            remaining.append(reveal)
+            continue
+        for player in game["players"].values():
+            for slot in player["board"]:
+                if (
+                    slot
+                    and slot.get("card")
+                    and slot["card"]["id"] == reveal["card_id"]
+                ):
+                    slot["revealed"] = False
+    game["failed_burn_reveals"] = remaining
+
+
+def track_failed_burn_reveal(game, target_card):
+    reveals = game.setdefault("failed_burn_reveals", [])
+    for reveal in reveals:
+        if reveal["card_id"] == target_card["id"]:
+            reveal["turns_remaining"] = 2
+            return
+    reveals.append({"card_id": target_card["id"], "turns_remaining": 2})
+
+
 def advance_turn(game):
+    # A missed burn stays visible for the rest of this turn and all of the next.
+    expire_failed_burn_reveals(game)
     previous_sid = current_sid(game)
     if previous_sid in game["final_turns_remaining"]:
         game["final_turns_remaining"].remove(previous_sid)
@@ -345,12 +433,15 @@ def advance_turn(game):
         refresh_final_countdown(game)
         return
 
-    if not game["player_order"]:
+    active_sids = active_player_sids(game)
+    if not active_sids:
         return
 
     for _ in range(len(game["player_order"])):
         game["turn_index"] = (game["turn_index"] + 1) % len(game["player_order"])
         next_sid = current_sid(game)
+        if next_sid not in active_sids:
+            continue
         if game["first_caller_sid"] and next_sid not in game["final_turns_remaining"]:
             continue
         break
@@ -384,7 +475,13 @@ def choose_low_tie_starter(game, low_sids):
 
 
 def finish_round(game):
-    hand_scores = {sid: score_board(game["players"][sid]["board"]) for sid in game["player_order"]}
+    round_sids = active_player_sids(game)
+    hand_scores = {
+        sid: score_board(game["players"][sid]["board"])
+        for sid in round_sids
+    }
+    if not hand_scores:
+        return
     caller_sid = game["first_caller_sid"]
 
     min_hand = min(hand_scores.values())
@@ -400,9 +497,14 @@ def finish_round(game):
 
     for sid, score in round_scores.items():
         game["players"][sid]["score"] += score
+    record_bot_round_outcomes(game, hand_scores, round_scores)
 
     target_score = int(game["settings"]["target_score"])
-    over_target = [sid for sid in game["player_order"] if game["players"][sid]["score"] >= target_score]
+    over_target = [
+        sid for sid in round_sids
+        if game["players"][sid]["score"] >= target_score
+    ]
+    win_condition = game["settings"].get("win_condition", "last_standing")
 
     game["round_results"] = {
         "raw_scores": hand_scores,
@@ -412,6 +514,7 @@ def finish_round(game):
         "caller_sid": caller_sid,
         "next_start_sid": game["next_start_sid"],
         "over_target": over_target,
+        "eliminated": [],
     }
     game["phase"] = "round_over"
     game["pending_draw"] = None
@@ -422,15 +525,58 @@ def finish_round(game):
     clear_burn_blockers(game)
     clear_last_action(game)
 
-    if over_target:
-        highest = max(game["players"][sid]["score"] for sid in over_target)
-        losers = [sid for sid in over_target if game["players"][sid]["score"] == highest]
+    if over_target and win_condition == "first_bust_lowest":
+        lowest_total = min(game["players"][sid]["score"] for sid in round_sids)
+        winners = [
+            sid for sid in round_sids
+            if game["players"][sid]["score"] == lowest_total
+        ]
         game["status"] = "game_over"
-        game["winner_summary"] = {"losers": losers, "target_score": target_score}
-        add_log(game, "Game over. First player to the target loses.")
-    else:
-        game["status"] = "round_over"
-        add_log(game, f"Round ended. {player_name(game, game['next_start_sid'])} starts next.")
+        game["winner_summary"] = {
+            "condition": win_condition,
+            "winners": winners,
+            "losers": over_target,
+            "target_score": target_score,
+        }
+        add_log(game, f"Game over. {player_name(game, winners[0])} has the lowest score.")
+        return
+
+    if over_target and win_condition == "last_standing":
+        for sid in over_target:
+            player = game["players"][sid]
+            player["eliminated"] = True
+            player["spectating"] = True
+            player["eliminated_round"] = game["round_number"]
+        game["round_results"]["eliminated"] = list(over_target)
+        survivors = active_player_sids(game)
+        if len(survivors) <= 1:
+            if survivors:
+                winners = survivors
+            else:
+                lowest_total = min(game["players"][sid]["score"] for sid in round_sids)
+                winners = [
+                    sid for sid in round_sids
+                    if game["players"][sid]["score"] == lowest_total
+                ]
+            game["status"] = "game_over"
+            game["winner_summary"] = {
+                "condition": win_condition,
+                "winners": winners,
+                "losers": [sid for sid in round_sids if sid not in winners],
+                "target_score": target_score,
+            }
+            add_log(game, f"Game over. {player_name(game, winners[0])} is the last player standing.")
+            return
+
+        survivor_low = min(hand_scores[sid] for sid in survivors)
+        game["next_start_sid"] = choose_low_tie_starter(
+            game,
+            [sid for sid in survivors if hand_scores[sid] == survivor_low],
+        )
+        game["round_results"]["next_start_sid"] = game["next_start_sid"]
+
+    game["status"] = "round_over"
+    add_log(game, f"Round ended. {player_name(game, game['next_start_sid'])} starts next.")
 
 
 def ensure_turn(game):
@@ -438,6 +584,9 @@ def ensure_turn(game):
         emit_error("The round is not active.")
         return False
     player = game["players"].get(request.sid)
+    if player and player.get("eliminated"):
+        emit_error("You are spectating and cannot take game actions.")
+        return False
     if player and player.get("called"):
         emit_error("You already called and cannot take any more actions this round.")
         return False
@@ -638,6 +787,17 @@ def apply_failed_burn(game, burner_sid, owner_sid, index, target_card, reason):
     slot = slot_at(game, owner_sid, index)
     if slot:
         slot["revealed"] = True
+        track_failed_burn_reveal(game, target_card)
+        game["burn_knowledge_epoch"] = game.get("burn_knowledge_epoch", 0) + 1
+        for observer_sid, player in game["players"].items():
+            if is_bot_player(player):
+                remember_bot_card(
+                    game,
+                    observer_sid,
+                    owner_sid,
+                    index,
+                    target_card,
+                )
     penalty = deal_penalty_card(game, burner_sid)
     penalty_action = None
     if penalty:
@@ -662,6 +822,169 @@ def apply_failed_burn(game, burner_sid, owner_sid, index, target_card, reason):
         game,
         f"{player_name(game, burner_sid)} missed a burn on {player_name(game, owner_sid)}'s card.{penalty_note}",
     )
+
+
+def burn_contest_for(game, discard_card_id, discard_card=None, attempted_at=None):
+    contests = game.setdefault("burn_contests", {})
+    contest = contests.get(discard_card_id)
+    if contest:
+        return contest
+    if discard_card is None:
+        return None
+    attempted_at = attempted_at if attempted_at is not None else time.time()
+    started_at = game.get("burn_window_started_at")
+    if game.get("burn_window_card_id") != discard_card_id or started_at is None:
+        started_at = attempted_at
+    contest = {
+        "discard_card_id": discard_card_id,
+        "discard_card": discard_card,
+        "started_at": started_at,
+        "attempts": [],
+        "winner_sid": None,
+        "winner_target": None,
+    }
+    contests[discard_card_id] = contest
+    if len(contests) > 12:
+        oldest_id = next(iter(contests))
+        if oldest_id != discard_card_id:
+            contests.pop(oldest_id, None)
+    return contest
+
+
+def register_burn_attempt(game, contest, sid, attempted_at):
+    if any(attempt["sid"] == sid for attempt in contest["attempts"]):
+        return None
+    elapsed_ms = max(0, int(round((attempted_at - contest["started_at"]) * 1000)))
+    attempt = {
+        "sid": sid,
+        "time_ms": elapsed_ms,
+        "result": "pending",
+        "penalty": False,
+    }
+    contest["attempts"].append(attempt)
+    return attempt
+
+
+def publish_burn_showdown(game, contest):
+    if not contest.get("winner_sid") or len(contest["attempts"]) < 2:
+        return
+    game["burn_showdown_sequence"] = game.get("burn_showdown_sequence", 0) + 1
+    game["burn_showdown"] = {
+        "id": game["burn_showdown_sequence"],
+        "discard_card": public_card(contest["discard_card"]),
+        "winner_sid": contest["winner_sid"],
+        "attempts": deepcopy(contest["attempts"]),
+    }
+
+
+def resolve_burn_attempt(
+    game,
+    burner_sid,
+    owner_sid,
+    index,
+    discard_card_id=None,
+    attempted_at=None,
+):
+    """Resolve normal and near-simultaneous burn attempts against one discard."""
+    attempted_at = attempted_at if attempted_at is not None else time.time()
+    if game.get("status") != "playing":
+        return "error", None, "The round is not active."
+    player = game["players"].get(burner_sid)
+    if not player:
+        return "error", None, "You are not in this game."
+    if player.get("eliminated"):
+        return "error", None, "You are spectating and cannot attempt burns."
+    if player.get("called"):
+        return "error", None, "You already called and cannot take any more actions this round."
+    pending_draw = game.get("pending_draw")
+    if pending_draw and pending_draw.get("sid") == burner_sid:
+        return "error", None, "You cannot burn while holding a card."
+
+    current_top = game["discard_pile"][-1] if game.get("discard_pile") else None
+    if discard_card_id is None and current_top:
+        discard_card_id = current_top["id"]
+    contest = game.get("burn_contests", {}).get(discard_card_id)
+    normal_attempt = bool(
+        current_top
+        and current_top["id"] == discard_card_id
+        and not is_discard_burn_locked(game, current_top)
+        and not game.get("pending_burn")
+    )
+    race_attempt = bool(contest and contest.get("winner_sid"))
+    if not normal_attempt and not race_attempt:
+        return "error", None, "That discard is no longer available to burn."
+
+    if contest is None:
+        contest = burn_contest_for(
+            game,
+            discard_card_id,
+            current_top,
+            attempted_at,
+        )
+    slot = slot_at(game, owner_sid, index)
+    target_card = slot.get("card") if slot else None
+    if not target_card and race_attempt:
+        winner_target = contest.get("winner_target") or {}
+        if winner_target.get("owner_sid") == owner_sid and winner_target.get("index") == index:
+            target_card = winner_target.get("card")
+    if not target_card:
+        return "error", None, "That burn target changed."
+    if is_burn_blocked(game, owner_sid, index, target_card["id"]):
+        return "error", target_card, "You cannot burn a card you just took from discard."
+    if owner_sid != burner_sid and card_count(player["board"]) == 0:
+        return "error", target_card, "You need one of your own cards to give them."
+
+    attempt = register_burn_attempt(game, contest, burner_sid, attempted_at)
+    if attempt is None:
+        return "error", None, "You already attempted this burn."
+
+    discard_card = contest["discard_card"]
+    if slot:
+        slot["revealed"] = True
+
+    matches = burn_matches(discard_card, target_card)
+    if race_attempt:
+        reason = "race_lost" if matches else "rank"
+        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, reason)
+        attempt["result"] = "late" if matches else "miss"
+        attempt["penalty"] = True
+        publish_burn_showdown(game, contest)
+        return "race_lost", target_card, None
+
+    if is_slot_burnt(game, owner_sid, index):
+        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, "already_burnt")
+        attempt["result"] = "miss"
+        attempt["penalty"] = True
+        return "failed", target_card, None
+    if not matches:
+        apply_failed_burn(game, burner_sid, owner_sid, index, target_card, "rank")
+        attempt["result"] = "miss"
+        attempt["penalty"] = True
+        return "failed", target_card, None
+
+    if owner_sid == burner_sid:
+        apply_successful_own_burn(game, burner_sid, owner_sid, index, target_card)
+    else:
+        ok, err = apply_successful_opponent_burn(
+            game,
+            burner_sid,
+            owner_sid,
+            index,
+            target_card,
+        )
+        if not ok:
+            attempt["result"] = "cancelled"
+            return "error", target_card, err
+
+    attempt["result"] = "winner"
+    contest["winner_sid"] = burner_sid
+    contest["winner_target"] = {
+        "owner_sid": owner_sid,
+        "index": index,
+        "card": target_card,
+    }
+    publish_burn_showdown(game, contest)
+    return "success", target_card, None
 
 
 def put_back_held_peek(game):
@@ -738,26 +1061,17 @@ def on_join(data):
     game = rooms[room]
     game["room_id"] = room
     if request.sid not in game["players"]:
+        if len(game["players"]) >= MAX_PLAYERS:
+            emit_error("This room is full.")
+            return
         game["players"][request.sid] = make_player(username)
+        if game["status"] != "lobby":
+            game["players"][request.sid]["eliminated"] = True
+            game["players"][request.sid]["spectating"] = True
         game["player_order"].append(request.sid)
     else:
         game["players"][request.sid]["username"] = username
         game["players"][request.sid]["connected"] = True
-
-    if (
-        game["status"] == "lobby"
-        and request.sid == game["host_sid"]
-        and data.get("bot_mode")
-    ):
-        configure_bots(
-            game,
-            room,
-            data.get("bot_count", 2),
-            data.get("bot_difficulty", "medium"),
-            data.get("bot_policy"),
-        )
-        game["players"][request.sid]["ready"] = True
-        start_round(game)
 
     emit_state(room)
 
@@ -769,12 +1083,104 @@ def on_update_settings(data):
     if not game or request.sid != game["host_sid"] or game["status"] != "lobby":
         return
 
-    target_score = max(10, min(500, int(data.get("target_score", 50))))
-    deck_count = max(1, min(4, int(data.get("deck_count", 1))))
-    jokers = max(0, min(8, int(data.get("jokers", 2))))
-    game["settings"].update(
-        {"target_score": target_score, "deck_count": deck_count, "jokers": jokers}
+    if data.get("preset") == "default":
+        game["settings"] = default_settings()
+        emit_state(room)
+        return
+
+    current = game["settings"]
+    try:
+        target_score = max(10, min(500, int(data.get("target_score", current["target_score"]))))
+    except (TypeError, ValueError):
+        target_score = current["target_score"]
+    rows = clamp_grid_dimension(data.get("grid_rows", current.get("grid_rows", 2)))
+    cols = clamp_grid_dimension(data.get("grid_cols", current.get("grid_cols", 2)))
+    modes = normalized_grid_modes(
+        data.get("grid_peek_modes", current.get("grid_peek_modes", [])),
+        rows,
+        cols,
     )
+    win_condition = data.get("win_condition", current.get("win_condition"))
+    if win_condition not in WIN_CONDITIONS:
+        win_condition = "last_standing"
+    direction = data.get(
+        "opponent_peek_direction",
+        current.get("opponent_peek_direction", "left"),
+    )
+    if direction not in {"left", "right"}:
+        direction = "left"
+    try:
+        distance = max(
+            1,
+            min(
+                MAX_PLAYERS - 1,
+                int(data.get("opponent_peek_distance", current.get("opponent_peek_distance", 1))),
+            ),
+        )
+    except (TypeError, ValueError):
+        distance = 1
+    try:
+        joker_value = int(data.get("joker_value", current.get("joker_value", -2)))
+    except (TypeError, ValueError):
+        joker_value = -2
+    if joker_value not in {-2, 0}:
+        joker_value = -2
+    try:
+        deck_count = max(1, min(4, int(data.get("deck_count", current.get("deck_count", 1)))))
+    except (TypeError, ValueError):
+        deck_count = current.get("deck_count", 1)
+    game["settings"].update(
+        {
+            "preset": "custom",
+            "target_score": target_score,
+            "win_condition": win_condition,
+            "grid_rows": rows,
+            "grid_cols": cols,
+            "grid_peek_modes": modes,
+            "opponent_peek_distance": distance,
+            "opponent_peek_direction": direction,
+            "deck_count": deck_count,
+            "joker_value": joker_value,
+        }
+    )
+    emit_state(room)
+
+
+@socketio.on("add_bot")
+def on_add_bot(data):
+    room = data["room"].upper()
+    game = rooms.get(room)
+    if not game or request.sid != game["host_sid"] or game["status"] != "lobby":
+        return
+    if len(game["players"]) >= MAX_PLAYERS:
+        emit_error(f"Rooms currently support up to {MAX_PLAYERS} players and bots.")
+        return
+    add_bot(game, room, data.get("difficulty", "medium"))
+    emit_state(room)
+
+
+@socketio.on("remove_bot")
+def on_remove_bot(data):
+    room = data["room"].upper()
+    game = rooms.get(room)
+    sid = data.get("sid")
+    if not game or request.sid != game["host_sid"] or game["status"] != "lobby":
+        return
+    player = game["players"].get(sid)
+    if not player or not is_bot_player(player):
+        return
+    del game["players"][sid]
+    game["player_order"] = [item for item in game["player_order"] if item != sid]
+    emit_state(room)
+
+
+@socketio.on("update_bot_difficulty")
+def on_update_bot_difficulty(data):
+    room = data["room"].upper()
+    game = rooms.get(room)
+    if not game or request.sid != game["host_sid"] or game["status"] != "lobby":
+        return
+    set_bot_difficulty(game, data.get("sid"), data.get("difficulty", "medium"))
     emit_state(room)
 
 
@@ -798,10 +1204,27 @@ def on_start_game(data):
     if request.sid != game["host_sid"]:
         emit_error("Only the host can start the game.")
         return
-    if len(game["players"]) < 2:
+    if len(active_player_sids(game)) < 2:
         emit_error("You need at least 2 players.")
         return
-    if not all(player["ready"] for player in game["players"].values()):
+    active_sids = active_player_sids(game)
+    board_cards = board_size_from_settings(game["settings"]) * len(active_sids)
+    deck_count = int(game["settings"].get("deck_count", 1))
+    cards_available = deck_count * (52 + int(game["settings"].get("jokers", 2)))
+    if cards_available <= board_cards:
+        emit_error("That grid needs more decks so at least one draw card remains.")
+        return
+    human_sids = [
+        sid for sid in active_sids
+        if not is_bot_player(game["players"][sid])
+    ]
+    solo_human_with_bots = len(human_sids) == 1
+    if not all(
+        game["players"][sid]["ready"]
+        or is_bot_player(game["players"][sid])
+        or solo_human_with_bots
+        for sid in active_sids
+    ):
         emit_error("Everyone needs to be ready.")
         return
     start_round(game)
@@ -825,7 +1248,7 @@ def on_next_round(data):
 
 @socketio.on("peek_opening")
 def on_peek_opening(data):
-    """Click-to-reveal one of your two bottom cards before your first turn action."""
+    """Reveal a custom-grid opening card the viewer is allowed to inspect."""
     room = data["room"].upper()
     game = rooms.get(room)
     if not game or game["status"] != "playing":
@@ -833,19 +1256,24 @@ def on_peek_opening(data):
     if request.sid not in game["players"]:
         return
     player = game["players"][request.sid]
-    if player["first_turn_started"]:
+    if player["first_turn_started"] or player.get("eliminated"):
         emit_error("Opening peek is over.")
         return
-    index = int(data.get("index", -1))
-    if index not in BOTTOM_ROW:
-        emit_error("You can only peek your two bottom cards at the start.")
+    owner_sid = data.get("owner_sid", request.sid)
+    try:
+        index = int(data.get("index", -1))
+    except (TypeError, ValueError):
+        emit_error("Choose a valid card to peek at.")
         return
-    slot = slot_at(game, request.sid, index)
+    if not can_opening_peek_slot(game, request.sid, owner_sid, index):
+        emit_error("That card is not included in your opening peek settings.")
+        return
+    slot = slot_at(game, owner_sid, index)
     if not slot or not slot.get("card"):
         emit_error("That slot is empty.")
         return
     peeked = player.setdefault("opening_peeked", set())
-    peeked.add(index)
+    peeked.add(f"{owner_sid}:{index}")
     emit_state(room)
 
 
@@ -1335,7 +1763,9 @@ def on_call_round(data):
     set_last_action(game, "call", sid=request.sid)
     if not game["first_caller_sid"]:
         game["first_caller_sid"] = request.sid
-        game["final_turns_remaining"] = [sid for sid in game["player_order"] if sid != request.sid]
+        game["final_turns_remaining"] = [
+            sid for sid in active_player_sids(game) if sid != request.sid
+        ]
         add_log(game, f"{player_name(game, request.sid)} called. Everyone else gets one final turn.")
     else:
         add_log(game, f"{player_name(game, request.sid)} called to protect their cards.")
@@ -1349,20 +1779,9 @@ def on_burn_card(data):
     game = rooms.get(room)
     if not game:
         return
-    ok, err = can_attempt_burn(game, request.sid)
-    if not ok:
-        emit_error(err)
-        return
 
     owner_sid = data.get("owner_sid")
     index = int(data.get("index", -1))
-    slot = slot_at(game, owner_sid, index)
-    if not slot or not slot.get("card"):
-        emit_error("Choose a live board card.")
-        return
-
-    top_card = game["discard_pile"][-1]
-    target_card = slot["card"]
     ability = game.get("pending_ability")
     inspection_burn = bool(
         ability
@@ -1371,42 +1790,18 @@ def on_burn_card(data):
         and {"owner_sid": owner_sid, "index": index}
         in ability.get("selected", [])
     )
-
-    if is_slot_burnt(game, owner_sid, index):
-        apply_failed_burn(game, request.sid, owner_sid, index, target_card, "already_burnt")
-        emit_state(room)
-        return
-
-    if is_burn_blocked(game, owner_sid, index, target_card["id"]):
-        emit_error("You cannot burn a card you just took from discard.")
-        return
-
-    slot["revealed"] = True
-
-    if not burn_matches(top_card, target_card):
-        apply_failed_burn(game, request.sid, owner_sid, index, target_card, "rank")
-        emit_state(room)
-        return
-
-    if owner_sid == request.sid:
-        apply_successful_own_burn(game, request.sid, owner_sid, index, target_card)
-        if inspection_burn:
-            record_switch_peek_burn(
-                game,
-                request.sid,
-                owner_sid,
-                index,
-                target_card,
-            )
-        emit_state(room)
-        return
-
-    ok, err = apply_successful_opponent_burn(game, request.sid, owner_sid, index, target_card)
-    if not ok:
+    outcome, target_card, err = resolve_burn_attempt(
+        game,
+        request.sid,
+        owner_sid,
+        index,
+        data.get("discard_id"),
+    )
+    if outcome == "error":
         emit_error(err)
         emit_state(room)
         return
-    if inspection_burn:
+    if outcome == "success" and inspection_burn:
         record_switch_peek_burn(
             game,
             request.sid,
