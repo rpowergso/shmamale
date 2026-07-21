@@ -58,6 +58,92 @@ from game import (
 rooms = {}
 FINAL_COUNTDOWN_SECONDS = 3.0
 MAX_PLAYERS = 6
+LOBBY_RECONNECT_GRACE_SECONDS = 60
+sid_redirects = {}
+
+
+def _replace_sid_string(value, old_sid, new_sid):
+    if value == old_sid:
+        return new_sid
+    prefix = f"{old_sid}:"
+    if value.startswith(prefix):
+        return f"{new_sid}:{value[len(prefix):]}"
+    return value
+
+
+def replace_sid_references(value, old_sid, new_sid):
+    """Replace a Socket.IO sid everywhere it can appear in live room state."""
+    if isinstance(value, str):
+        return _replace_sid_string(value, old_sid, new_sid)
+    if isinstance(value, dict):
+        return {
+            replace_sid_references(key, old_sid, new_sid): replace_sid_references(
+                item, old_sid, new_sid
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [replace_sid_references(item, old_sid, new_sid) for item in value]
+    if isinstance(value, tuple):
+        return tuple(replace_sid_references(item, old_sid, new_sid) for item in value)
+    if isinstance(value, set):
+        return {replace_sid_references(item, old_sid, new_sid) for item in value}
+    return value
+
+
+def apply_sid_redirects(value):
+    for old_sid, new_sid in list(sid_redirects.items()):
+        value = replace_sid_references(value, old_sid, new_sid)
+    return value
+
+
+def rebind_player_sid(room, game, old_sid, new_sid):
+    updated = replace_sid_references(game, old_sid, new_sid)
+    game.clear()
+    game.update(updated)
+    for original, destination in list(sid_redirects.items()):
+        if destination == old_sid:
+            sid_redirects[original] = new_sid
+    sid_redirects[old_sid] = new_sid
+    rooms[room] = game
+    return game
+
+
+def reconnecting_player_sid(game, reconnect_token):
+    if not reconnect_token:
+        return None
+    return next(
+        (
+            sid
+            for sid, player in game["players"].items()
+            if not is_bot_player(player)
+            and player.get("reconnect_token") == reconnect_token
+        ),
+        None,
+    )
+
+
+def cleanup_disconnected_lobby_player(room, sid, reconnect_token):
+    socketio.sleep(LOBBY_RECONNECT_GRACE_SECONDS)
+    game = rooms.get(room)
+    if not game or game.get("status") != "lobby":
+        return
+    player = game["players"].get(sid)
+    if (
+        not player
+        or player.get("connected")
+        or player.get("reconnect_token") != reconnect_token
+    ):
+        return
+    del game["players"][sid]
+    game["player_order"] = [item for item in game["player_order"] if item != sid]
+    humans = live_human_sids(game)
+    if sid == game["host_sid"] and humans:
+        game["host_sid"] = humans[0]
+    if not humans:
+        rooms.pop(room, None)
+        return
+    emit_state(room)
 
 def live_human_sids(game):
     return [
@@ -703,6 +789,8 @@ def resolve_unseen_switch(room, actor_sid, selected):
     game = rooms.get(room)
     if not game:
         return
+    actor_sid = apply_sid_redirects(actor_sid)
+    selected = apply_sid_redirects(selected)
     ability = game.get("pending_ability")
     if (
         game.get("status") != "playing"
@@ -1051,20 +1139,34 @@ def begin_held_peek(game, viewer_sid, owner_sid, index):
 
 @socketio.on("join")
 def on_join(data):
-    room = data["room"].upper()
+    data = data or {}
+    room = str(data.get("room", "")).upper().strip()
+    if not room:
+        emit_error("A room code is required.")
+        return
     username = data.get("username", "Anonymous").strip() or "Anonymous"
-    join_room(room)
+    reconnect_token = str(data.get("reconnect_token", "")).strip()[:128]
 
     if room not in rooms:
         rooms[room] = new_room(request.sid)
 
     game = rooms[room]
     game["room_id"] = room
-    if request.sid not in game["players"]:
+    reconnect_sid = reconnecting_player_sid(game, reconnect_token)
+    if reconnect_sid and reconnect_sid != request.sid:
+        reconnecting_player = game["players"][reconnect_sid]
+        if reconnecting_player.get("connected"):
+            emit_error("This player is already connected in another tab.")
+            return
+        game = rebind_player_sid(room, game, reconnect_sid, request.sid)
+        game["players"][request.sid]["username"] = username
+        game["players"][request.sid]["connected"] = True
+    elif request.sid not in game["players"]:
         if len(game["players"]) >= MAX_PLAYERS:
             emit_error("This room is full.")
             return
         game["players"][request.sid] = make_player(username)
+        game["players"][request.sid]["reconnect_token"] = reconnect_token
         if game["status"] != "lobby":
             game["players"][request.sid]["eliminated"] = True
             game["players"][request.sid]["spectating"] = True
@@ -1072,7 +1174,10 @@ def on_join(data):
     else:
         game["players"][request.sid]["username"] = username
         game["players"][request.sid]["connected"] = True
+        if reconnect_token:
+            game["players"][request.sid]["reconnect_token"] = reconnect_token
 
+    join_room(room)
     emit_state(room)
 
 
@@ -1869,17 +1974,15 @@ def on_disconnect():
     if not game:
         return
 
+    player = game["players"][request.sid]
+    player["connected"] = False
+    add_log(game, f"{player_name(game, request.sid)} disconnected.")
     if game["status"] == "lobby":
-        del game["players"][request.sid]
-        game["player_order"] = [sid for sid in game["player_order"] if sid != request.sid]
-        humans = live_human_sids(game)
-        if request.sid == game["host_sid"] and humans:
-            game["host_sid"] = humans[0]
-        if not humans:
-            rooms.pop(room, None)
-            return
-    else:
-        game["players"][request.sid]["connected"] = False
-        add_log(game, f"{player_name(game, request.sid)} disconnected.")
+        socketio.start_background_task(
+            cleanup_disconnected_lobby_player,
+            room,
+            request.sid,
+            player.get("reconnect_token", ""),
+        )
 
     emit_state(room)

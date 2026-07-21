@@ -1,4 +1,9 @@
 function initializeGameMode() {
+    const savedUsername = savedRoomUsername();
+    if (savedUsername) {
+        joinGame(savedUsername);
+        return;
+    }
     const modal = document.createElement("div");
     modal.className = "modal-backdrop";
     modal.innerHTML = `

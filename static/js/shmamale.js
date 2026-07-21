@@ -38,6 +38,8 @@ let keyboardNav = {
     menuOpen: false,
     menuIndex: 0,
 };
+const roomStoragePrefix = `shmamale:${ROOM_ID}:`;
+const reconnectToken = loadReconnectToken();
 
 const els = {};
 
@@ -65,6 +67,7 @@ document.addEventListener("DOMContentLoaded", () => {
 socket.on("connect", () => {
     mySid = socket.id;
     setConnBanner("", true);
+    if (myUsername && state) joinGame(myUsername, { reconnect: true });
     if (state) render();
 });
 
@@ -424,14 +427,46 @@ function bindCardPointerFallback() {
 
 function joinGame(username, options = {}) {
     myUsername = username;
+    setRoomSessionValue("username", username);
     socket.emit("join", {
         room: ROOM_ID,
         username,
+        reconnect_token: reconnectToken,
         bot_mode: Boolean(options.botMode),
         bot_count: options.botCount || 0,
         bot_difficulty: options.botDifficulty || "medium",
         bot_policy: options.botPolicy || null,
     });
+}
+
+function getRoomSessionValue(name) {
+    try {
+        return window.sessionStorage.getItem(`${roomStoragePrefix}${name}`) || "";
+    } catch (_error) {
+        return "";
+    }
+}
+
+function setRoomSessionValue(name, value) {
+    try {
+        window.sessionStorage.setItem(`${roomStoragePrefix}${name}`, value);
+    } catch (_error) {
+        // Private browsing or locked-down storage should not block joining.
+    }
+}
+
+function loadReconnectToken() {
+    const saved = getRoomSessionValue("reconnect-token");
+    if (saved) return saved;
+    const token = window.crypto?.randomUUID
+        ? window.crypto.randomUUID()
+        : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
+    setRoomSessionValue("reconnect-token", token);
+    return token;
+}
+
+function savedRoomUsername() {
+    return getRoomSessionValue("username");
 }
 
 function emptyRecentCardMarks() {

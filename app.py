@@ -1,12 +1,14 @@
+import os
+import secrets
 import uuid
 
-from flask import Flask, redirect, render_template, request, url_for
+from flask import Flask, jsonify, redirect, render_template, request, url_for
 
 from extensions import socketio
 
 
 app = Flask(__name__)
-app.secret_key = "shmamale_secret"
+app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 socketio.init_app(app)
 
 
@@ -23,6 +25,11 @@ def homepage():
 @app.route("/tutorial")
 def tutorial():
     return render_template("tutorial.html")
+
+
+@app.route("/health")
+def health():
+    return jsonify(status="ok")
 
 
 @app.route("/create-room")
@@ -61,4 +68,5 @@ import multiplayer  # noqa: E402,F401
 
 
 if __name__ == "__main__":
-    socketio.run(app, host="0.0.0.0", port=5000, allow_unsafe_werkzeug=True)
+    port = int(os.environ.get("PORT", "5000"))
+    socketio.run(app, host="0.0.0.0", port=port, allow_unsafe_werkzeug=True)

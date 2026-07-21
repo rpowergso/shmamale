@@ -1,3 +1,4 @@
+import json
 import unittest
 
 from app import app, socketio
@@ -319,6 +320,70 @@ class UnifiedLobbySocketTests(unittest.TestCase):
             friend.disconnect()
 
 
+class SocketReconnectTests(unittest.TestCase):
+    def tearDown(self):
+        rooms.pop("REJOIN", None)
+
+    def test_disconnected_player_reclaims_live_game_with_stable_token(self):
+        first = socketio.test_client(app)
+        second = None
+        try:
+            first.emit(
+                "join",
+                {
+                    "room": "REJOIN",
+                    "username": "Host",
+                    "reconnect_token": "stable-browser-token",
+                },
+            )
+            game = rooms["REJOIN"]
+            old_sid = game["player_order"][0]
+            game["status"] = "playing"
+            game["phase"] = "drawn"
+            game["current_turn_sid"] = old_sid
+            game["pending_draw"] = {
+                "sid": old_sid,
+                "card": card("4"),
+                "source": "draw",
+            }
+            game["burnt_slots"] = [f"{old_sid}:0"]
+
+            first.disconnect()
+            self.assertFalse(game["players"][old_sid]["connected"])
+
+            second = socketio.test_client(app)
+            second.emit(
+                "join",
+                {
+                    "room": "REJOIN",
+                    "username": "Host",
+                    "reconnect_token": "stable-browser-token",
+                },
+            )
+
+            game = rooms["REJOIN"]
+            new_sid = game["player_order"][0]
+            self.assertNotEqual(new_sid, old_sid)
+            self.assertNotIn(old_sid, game["players"])
+            self.assertEqual(game["host_sid"], new_sid)
+            self.assertEqual(game["current_turn_sid"], new_sid)
+            self.assertEqual(game["pending_draw"]["sid"], new_sid)
+            self.assertEqual(game["burnt_slots"], [f"{new_sid}:0"])
+            self.assertTrue(game["players"][new_sid]["connected"])
+            states = [
+                packet["args"][0]
+                for packet in second.get_received()
+                if packet["name"] == "game_state"
+            ]
+            self.assertTrue(states)
+            self.assertEqual(states[-1]["viewer_sid"], new_sid)
+        finally:
+            if first.is_connected():
+                first.disconnect()
+            if second and second.is_connected():
+                second.disconnect()
+
+
 class UnifiedRoomRouteTests(unittest.TestCase):
     def test_home_and_legacy_bot_routes_lead_to_unified_rooms(self):
         client = app.test_client()
@@ -328,6 +393,10 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"HOW TO PLAY", homepage.data)
         self.assertIn(b'href="/tutorial"', homepage.data)
         self.assertNotIn(b"VS BOTS", homepage.data)
+
+        health = client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.get_json(), {"status": "ok"})
 
         tutorial = client.get("/tutorial")
         self.assertEqual(tutorial.status_code, 200)
@@ -368,6 +437,14 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"selectKeyboardPlayer(Number(event.key))", game_js)
         self.assertIn(b'event.code === "Space"', game_js)
         self.assertIn(b'event.key === "Enter"', game_js)
+
+        with app.open_resource("railway.json") as railway_file:
+            railway_config = json.load(railway_file)
+        start_command = railway_config["deploy"]["startCommand"]
+        self.assertIn("--worker-class gthread", start_command)
+        self.assertIn("--workers 1", start_command)
+        self.assertIn("${PORT:-8000}", start_command)
+        self.assertEqual(railway_config["deploy"]["healthcheckPath"], "/health")
         self.assertNotIn(b".grid-rule-cell.seat", css)
 
 
