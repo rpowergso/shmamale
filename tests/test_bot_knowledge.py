@@ -4,12 +4,15 @@ from unittest.mock import patch
 
 from bot import (
     BOT_CONFIG,
+    BOT_DIFFICULTIES,
     UNKNOWN_CARD_VALUE,
     bot_pressure,
     bot_should_call,
+    bot_should_play_ability,
     choose_bot_burn_candidate,
     configure_bots,
     estimated_board_score,
+    estimated_player_board_score,
     initialize_bot_round_knowledge,
     known_card_info,
     remember_bot_card,
@@ -130,10 +133,18 @@ class MediumDifficultyTests(unittest.TestCase):
 
     def test_medium_baseline_is_challenging(self):
         medium = BOT_CONFIG["medium"]
-        self.assertLessEqual(medium["mistake"], 0.04)
-        self.assertLessEqual(medium["reaction"][1], 3.4)
-        self.assertGreaterEqual(medium["call_score"], 4)
-        self.assertGreaterEqual(medium["ability_rate"], 0.9)
+        self.assertLessEqual(medium["mistake"], 0.01)
+        self.assertLessEqual(medium["reaction"][1], 1.6)
+        self.assertGreaterEqual(medium["call_score"], 6)
+        self.assertGreaterEqual(medium["ability_rate"], 0.99)
+
+    def test_hard_is_materially_stronger_than_medium(self):
+        medium = BOT_CONFIG["medium"]
+        hard = BOT_CONFIG["hard"]
+        self.assertLess(hard["reaction"][1], medium["reaction"][0])
+        self.assertLessEqual(hard["memory_error"], medium["memory_error"])
+        self.assertLessEqual(hard["mistake"], medium["mistake"])
+        self.assertGreater(hard["switch_peek_value"], medium["switch_peek_value"])
 
     def test_medium_tightens_strategy_when_badly_trailing(self):
         game = self.make_game()
@@ -168,6 +179,84 @@ class MediumDifficultyTests(unittest.TestCase):
         self.assertEqual(telemetry["rounds"][-1]["points"], 9)
         self.assertEqual(game["bot_match_log"][0]["event"], "draw")
         self.assertEqual(game["bot_match_log"][-1]["event"], "round_result")
+
+
+class SweatDifficultyTests(unittest.TestCase):
+    def make_game(self, hidden_rank="K", hidden_suit="clubs"):
+        game = new_room("human")
+        game["status"] = "playing"
+        game["players"] = {
+            "human": make_player("Human"),
+            "bot": make_player(
+                "Sweat Bot",
+                is_bot=True,
+                difficulty="sweat",
+                bot_policy=deepcopy(BOT_CONFIG["sweat"]),
+            ),
+        }
+        game["player_order"] = ["human", "bot"]
+        game["players"]["human"]["board"] = [
+            make_slot(card(hidden_rank, hidden_suit)) for _ in range(4)
+        ]
+        game["players"]["bot"]["board"] = [
+            make_slot(card("2")),
+            make_slot(card("2", "spades")),
+            make_slot(card("3")),
+            make_slot(card("3", "spades")),
+        ]
+        for index in range(4):
+            remember_bot_card(game, "bot", "bot", index)
+        return game
+
+    def test_sweat_is_available_instant_and_error_free(self):
+        sweat = BOT_CONFIG["sweat"]
+        self.assertIn("sweat", BOT_DIFFICULTIES)
+        self.assertTrue(sweat["instant_actions"])
+        self.assertLessEqual(sweat["reaction"][1], 0.04)
+        self.assertEqual(sweat["mistake"], 0)
+        self.assertEqual(sweat["memory_error"], 0)
+        self.assertEqual(sweat["burn_miss_rate"], 0)
+
+    def test_sweat_estimates_hidden_cards_instead_of_reading_them(self):
+        high_game = self.make_game("K", "clubs")
+        low_game = self.make_game("K", "hearts")
+
+        high_estimate = estimated_player_board_score(high_game, "bot", "human")
+        low_estimate = estimated_player_board_score(low_game, "bot", "human")
+        self.assertEqual(high_estimate, low_estimate)
+        self.assertEqual(high_estimate, UNKNOWN_CARD_VALUE * 4)
+        self.assertTrue(all(
+            known_card_info(high_game, "bot", "human", index) is None
+            for index in range(4)
+        ))
+
+    def test_sweat_values_a_large_swap_over_a_small_special(self):
+        game = self.make_game()
+        seven = card("7")
+        black_king = card("K", "clubs")
+        with patch("bot.random.random", return_value=0.5):
+            self.assertFalse(bot_should_play_ability(game, "bot", seven, 12))
+            self.assertTrue(bot_should_play_ability(game, "bot", black_king, 4))
+
+    def test_sweat_calls_from_a_probable_lead_using_only_visible_information(self):
+        game = self.make_game()
+        policy = game["players"]["bot"]["bot_policy"]
+        policy["call_score"] = -1
+        policy["call_card_count"] = 0
+        with patch("bot.random.random", return_value=0.5):
+            self.assertTrue(bot_should_call(game, "bot"))
+
+        game["players"]["human"]["board"] = [
+            {"card": card("A", suit), "revealed": True}
+            for suit in ("clubs", "spades", "hearts", "diamonds")
+        ]
+        with patch("bot.random.random", return_value=0.5):
+            self.assertFalse(bot_should_call(game, "bot"))
+
+    def test_sweat_still_will_not_burn_an_unknown_match(self):
+        game = self.make_game("7", "hearts")
+        top_card = card("7", "clubs")
+        self.assertIsNone(choose_bot_burn_candidate(game, top_card, "bot"))
 
 
 if __name__ == "__main__":

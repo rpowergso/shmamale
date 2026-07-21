@@ -36,7 +36,7 @@ from game import (
 
 BOT_NAMES = ["Mina", "Jax", "Rin", "Theo", "Zara"]
 UNKNOWN_CARD_VALUE = (336 - 4) / 54
-BOT_DIFFICULTIES = {"easy", "medium", "hard", "custom"}
+BOT_DIFFICULTIES = {"easy", "medium", "hard", "sweat", "custom"}
 BOT_CONFIG = {
     "easy": {
         "reaction": (3.2, 5.2),
@@ -47,12 +47,18 @@ BOT_CONFIG = {
         "take_low_value": 1,
         "take_low_min_gain": 1,
         "ability_rate": 0.25,
+        "peek_own_value": 0.5,
+        "peek_other_value": 0.25,
+        "switch_unseen_value": 1.0,
+        "switch_peek_value": 1.5,
         "call_score": -1,
         "call_rate": 0.45,
         "call_card_count": 0,
         "call_card_score": -1,
         "final_call_score": -1,
         "final_call_rate": 0.35,
+        "competitive_call_score": -1,
+        "competitive_call_margin": 99,
         "burn_own_min": 9,
         "burn_opponent_gain": 99,
         "peek_burn_rate": 0.25,
@@ -64,54 +70,98 @@ BOT_CONFIG = {
         "mistake": 0.35,
     },
     "medium": {
-        "reaction": (1.9, 3.4),
-        "memory_error": 0.035,
-        "burn_miss_rate": 0.01,
-        "swap_gain": 1.25,
-        "discard_gain": 1.25,
+        "reaction": (0.9, 1.6),
+        "memory_error": 0.012,
+        "burn_miss_rate": 0.003,
+        "swap_gain": 0.35,
+        "discard_gain": 0.25,
         "take_low_value": 0,
         "take_low_min_gain": 0,
-        "ability_rate": 0.92,
-        "call_score": 4,
-        "call_rate": 0.98,
-        "call_card_count": 3,
-        "call_card_score": 5,
-        "final_call_score": 8,
-        "final_call_rate": 1.0,
-        "burn_own_min": 3,
-        "burn_opponent_gain": 2,
-        "peek_burn_rate": 0.94,
-        "random_swap": 0.02,
-        "switch_random_rate": 0.0,
-        "switch_execute_rate": 0.98,
-        "switch_own_min": 3,
-        "switch_target_lowest": 0.8,
-        "mistake": 0.04,
-    },
-    "hard": {
-        "reaction": (1.6, 3.0),
-        "memory_error": 0.025,
-        "burn_miss_rate": 0.008,
-        "swap_gain": 1,
-        "discard_gain": 1,
-        "take_low_value": 0,
-        "take_low_min_gain": 0,
-        "ability_rate": 0.95,
-        "call_score": 0,
+        "ability_rate": 0.99,
+        "peek_own_value": 2.0,
+        "peek_other_value": 1.0,
+        "switch_unseen_value": 3.0,
+        "switch_peek_value": 5.0,
+        "call_score": 6,
         "call_rate": 1.0,
         "call_card_count": 3,
-        "call_card_score": 3,
-        "final_call_score": 7,
+        "call_card_score": 7,
+        "final_call_score": 10,
         "final_call_rate": 1.0,
+        "competitive_call_score": 10,
+        "competitive_call_margin": 2,
         "burn_own_min": 1,
         "burn_opponent_gain": 0,
-        "peek_burn_rate": 0.98,
-        "random_swap": 0.01,
+        "peek_burn_rate": 1.0,
+        "random_swap": 0.005,
+        "switch_random_rate": 0.0,
+        "switch_execute_rate": 1.0,
+        "switch_own_min": 1,
+        "switch_target_lowest": 1.0,
+        "mistake": 0.01,
+    },
+    "hard": {
+        "reaction": (0.3, 0.7),
+        "memory_error": 0.0,
+        "burn_miss_rate": 0.0,
+        "swap_gain": 0.05,
+        "discard_gain": 0.05,
+        "take_low_value": 0,
+        "take_low_min_gain": 0,
+        "ability_rate": 1.0,
+        "peek_own_value": 3.0,
+        "peek_other_value": 1.5,
+        "switch_unseen_value": 5.0,
+        "switch_peek_value": 8.0,
+        "call_score": 8,
+        "call_rate": 1.0,
+        "call_card_count": 3,
+        "call_card_score": 9,
+        "final_call_score": 12,
+        "final_call_rate": 1.0,
+        "competitive_call_score": 12,
+        "competitive_call_margin": 1,
+        "burn_own_min": -2,
+        "burn_opponent_gain": -2,
+        "peek_burn_rate": 1.0,
+        "random_swap": 0.0,
         "switch_random_rate": 0.0,
         "switch_execute_rate": 1.0,
         "switch_own_min": -2,
         "switch_target_lowest": 1,
-        "mistake": 0.03,
+        "mistake": 0.0,
+    },
+    "sweat": {
+        "reaction": (0.01, 0.04),
+        "instant_actions": True,
+        "memory_error": 0.0,
+        "burn_miss_rate": 0.0,
+        "swap_gain": 0.001,
+        "discard_gain": 0.001,
+        "take_low_value": 0,
+        "take_low_min_gain": 0.001,
+        "ability_rate": 1.0,
+        "peek_own_value": 3.5,
+        "peek_other_value": 2.0,
+        "switch_unseen_value": 6.0,
+        "switch_peek_value": 10.0,
+        "call_score": 10,
+        "call_rate": 1.0,
+        "call_card_count": 4,
+        "call_card_score": 12,
+        "final_call_score": 14,
+        "final_call_rate": 1.0,
+        "competitive_call_score": 14,
+        "competitive_call_margin": 0.5,
+        "burn_own_min": -2,
+        "burn_opponent_gain": -2,
+        "peek_burn_rate": 1.0,
+        "random_swap": 0.0,
+        "switch_random_rate": 0.0,
+        "switch_execute_rate": 1.0,
+        "switch_own_min": -2,
+        "switch_target_lowest": 1.0,
+        "mistake": 0.0,
     },
 }
 
@@ -151,6 +201,10 @@ def normalize_bot_policy(raw_policy, difficulty):
         "take_low_value": (-2.0, 13.0),
         "take_low_min_gain": (-5.0, 20.0),
         "ability_rate": (0.0, 1.0),
+        "peek_own_value": (0.0, 20.0),
+        "peek_other_value": (0.0, 20.0),
+        "switch_unseen_value": (0.0, 20.0),
+        "switch_peek_value": (0.0, 20.0),
         "peek_burn_rate": (0.0, 1.0),
         "call_score": (-5.0, 30.0),
         "call_rate": (0.0, 1.0),
@@ -158,6 +212,8 @@ def normalize_bot_policy(raw_policy, difficulty):
         "call_card_score": (-5.0, 30.0),
         "final_call_score": (-5.0, 30.0),
         "final_call_rate": (0.0, 1.0),
+        "competitive_call_score": (-5.0, 30.0),
+        "competitive_call_margin": (0.0, 99.0),
         "burn_own_min": (-2.0, 99.0),
         "burn_opponent_gain": (-5.0, 99.0),
         "switch_random_rate": (0.0, 1.0),
@@ -437,9 +493,14 @@ def perceived_slot_value(game, observer_sid, owner_sid, index, config=None):
 
 def estimated_board_score(game, sid, config=None):
     config = config or strategy_config(game, sid)
+    return estimated_player_board_score(game, sid, sid, config)
+
+
+def estimated_player_board_score(game, observer_sid, owner_sid, config=None):
+    config = config or strategy_config(game, observer_sid)
     return sum(
-        perceived_slot_value(game, sid, sid, index, config)
-        for index, _ in live_slots_for(game, sid)
+        perceived_slot_value(game, observer_sid, owner_sid, index, config)
+        for index, _ in live_slots_for(game, owner_sid)
     )
 
 
@@ -521,11 +582,20 @@ def run_bot_work(room, key):
     sid = key[1]
     if not game or sid not in game["players"]:
         return
-    low, high = strategy_config(game, sid)["reaction"]
-    if key[0] == "held_peek":
-        low, high = max(low, 3.0), max(high, 4.5)
-    elif key[0] == "ability":
-        low, high = max(low * 0.85, 1.4), max(high * 0.95, 2.5)
+    config = strategy_config(game, sid)
+    low, high = config["reaction"]
+    if not config.get("instant_actions"):
+        if key[0] == "held_peek":
+            difficulty = game["players"][sid].get("difficulty", "medium")
+            peek_floor = {
+                "easy": (3.0, 4.5),
+                "medium": (1.0, 1.7),
+                "hard": (0.45, 0.85),
+                "custom": (1.0, 1.7),
+            }.get(difficulty, (1.0, 1.7))
+            low, high = max(low, peek_floor[0]), max(high, peek_floor[1])
+        elif key[0] == "ability":
+            low, high = max(low * 0.85, 0.3), max(high * 0.95, 0.6)
     socketio.sleep(random.uniform(low, high))
 
     game = mp.rooms.get(room)
@@ -750,11 +820,14 @@ def bot_should_call(game, sid):
     call_card_count = config["call_card_count"] * size_scale
     call_card_score = config["call_card_score"] * size_scale
     final_call_score = config["final_call_score"] * size_scale
+    competitive_call_score = config.get("competitive_call_score", -1) * size_scale
+    competitive_call_margin = config.get("competitive_call_margin", 99) * size_scale
     target = int(game["settings"].get("target_score", 50))
     safe_call_score = target - player.get("score", 0) - 1
     call_score = min(call_score, safe_call_score)
     call_card_score = min(call_card_score, safe_call_score)
     final_call_score = min(final_call_score, safe_call_score)
+    competitive_call_score = min(competitive_call_score, safe_call_score)
     if player["called"]:
         return False
     if game["first_caller_sid"]:
@@ -764,7 +837,36 @@ def bot_should_call(game, sid):
         and cards <= call_card_count
         and score <= call_card_score
     )
+    opponent_scores = [
+        estimated_player_board_score(game, sid, owner_sid, config)
+        for owner_sid in active_player_sids(game)
+        if owner_sid != sid
+    ]
+    likely_leading = bool(opponent_scores) and (
+        score <= competitive_call_score
+        and score + competitive_call_margin <= min(opponent_scores)
+    )
+    should_call = should_call or likely_leading
     return should_call and random.random() < config["call_rate"]
+
+
+def bot_should_play_ability(game, sid, card, swap_gain, config=None):
+    ability = card.get("ability")
+    if not ability:
+        return False
+    config = config or strategy_config(game, sid)
+    value_key = {
+        "peek_own": "peek_own_value",
+        "peek_other": "peek_other_value",
+        "switch_unseen": "switch_unseen_value",
+        "switch_peek": "switch_peek_value",
+    }.get(ability)
+    if not value_key:
+        return False
+    board_cards = max(1, len(game["settings"].get("grid_peek_modes", [])) or 4)
+    board_scale = (board_cards / 4) ** 0.5
+    ability_value = config.get(value_key, 0) * board_scale
+    return swap_gain <= ability_value and random.random() < config["ability_rate"]
 
 
 def perform_bot_choose(game, sid):
@@ -829,7 +931,7 @@ def perform_bot_drawn(game, sid):
     should_swap = index is not None and (
         gain >= config["swap_gain"] or (card["value"] <= 0 and gain >= 0)
     )
-    if card["ability"] and card["value"] >= 7 and random.random() < config["ability_rate"]:
+    if bot_should_play_ability(game, sid, card, gain, config):
         should_swap = False
     if random.random() < config["mistake"]:
         should_swap = not should_swap

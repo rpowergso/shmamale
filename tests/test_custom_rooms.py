@@ -259,6 +259,15 @@ class UnifiedLobbySocketTests(unittest.TestCase):
                 {"room": "LOBBY", "sid": bot_sid, "difficulty": "hard"},
             )
             self.assertEqual(game["players"][bot_sid]["difficulty"], "hard")
+            client.emit(
+                "update_bot_difficulty",
+                {"room": "LOBBY", "sid": bot_sid, "difficulty": "sweat"},
+            )
+            self.assertEqual(game["players"][bot_sid]["difficulty"], "sweat")
+            self.assertLessEqual(
+                game["players"][bot_sid]["bot_policy"]["reaction"][1],
+                0.04,
+            )
             client.emit("remove_bot", {"room": "LOBBY", "sid": bot_sid})
             self.assertNotIn(bot_sid, game["players"])
 
@@ -589,6 +598,7 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"delta_ms", game_js)
         self.assertIn(b"function setLobbySettingsOpen", game_js)
         self.assertIn(b"els.settingJokers", game_js)
+        self.assertIn(b'"sweat", "custom"', game_js)
 
         self.assertIn(b".board-card.king-targeted", css)
         self.assertIn(b".board-card.burn-attempt-pending", css)

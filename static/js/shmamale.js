@@ -720,7 +720,7 @@ function renderLobby() {
         const botControls = player.is_bot && amHost
             ? `<div class="bot-row-controls">
                 <select data-bot-difficulty="${escapeHtml(sid)}" aria-label="${escapeHtml(player.username)} difficulty">
-                    ${["easy", "medium", "hard", "custom"].map((level) => (
+                    ${["easy", "medium", "hard", "sweat", "custom"].map((level) => (
                         `<option value="${level}" ${difficulty === level ? "selected" : ""}>${level.toUpperCase()}</option>`
                     )).join("")}
                 </select>
