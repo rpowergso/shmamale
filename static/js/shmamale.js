@@ -332,7 +332,7 @@ function pileControlAtPoint(clientX, clientY) {
     return candidates.find((el) => !el.classList.contains("hidden") && pointInRect(clientX, clientY, el)) || null;
 }
 
-function cardAtPoint(clientX, clientY) {
+function cardAtPoint(clientX, clientY, tolerance = 0) {
     // Piles sit in the middle — never treat them as board cards.
     if (pileControlAtPoint(clientX, clientY)) return null;
 
@@ -345,7 +345,12 @@ function cardAtPoint(clientX, clientY) {
     document.querySelectorAll(".board-card").forEach((card) => {
         if (card.classList.contains("ability-picked-up")) return;
         const r = card.getBoundingClientRect();
-        if (clientX < r.left || clientX > r.right || clientY < r.top || clientY > r.bottom) return;
+        if (
+            clientX < r.left - tolerance
+            || clientX > r.right + tolerance
+            || clientY < r.top - tolerance
+            || clientY > r.bottom + tolerance
+        ) return;
         const cx = (r.left + r.right) / 2;
         const cy = (r.top + r.bottom) / 2;
         const dist = (cx - clientX) ** 2 + (cy - clientY) ** 2;
@@ -394,7 +399,8 @@ function bindCardPointerFallback() {
             return;
         }
 
-        const card = cardAtPoint(event.clientX, event.clientY);
+        const touchTolerance = window.matchMedia?.("(pointer: coarse)")?.matches ? 10 : 0;
+        const card = cardAtPoint(event.clientX, event.clientY, touchTolerance);
         if (!card || card.classList.contains("empty")) return;
         const owner = card.getAttribute("data-owner");
         const index = Number(card.getAttribute("data-index"));
@@ -1159,10 +1165,13 @@ function applyTableCameraSettings(force = false) {
     const measuredHeight = stage.clientHeight;
     if (measuredWidth < 8 || measuredHeight < 8) return null;
     if (!force && tableCameraCache) return tableCameraCache;
-    const stageWidth = Math.max(320, measuredWidth);
-    const stageHeight = Math.max(420, measuredHeight);
-    const topClearance = stageWidth < 700 ? 34 : 42;
-    const legReserve = stageWidth < 700 ? 74 : 122;
+    const compactLandscape = window.matchMedia?.(
+        "(max-width: 850px) and (orientation: landscape)",
+    )?.matches;
+    const stageWidth = Math.max(compactLandscape ? 260 : 320, measuredWidth);
+    const stageHeight = Math.max(compactLandscape ? 250 : 420, measuredHeight);
+    const topClearance = compactLandscape ? 14 : stageWidth < 700 ? 34 : 42;
+    const legReserve = compactLandscape ? 24 : stageWidth < 700 ? 74 : 122;
     const l = TABLE.cameraLength;
     const d = TABLE.cameraDistance;
     const h = TABLE.cameraHeight;
@@ -1171,7 +1180,7 @@ function applyTableCameraSettings(force = false) {
     const farPerUnit = h * l * b / (l * l + d * b);
     const unitByWidth = stageWidth * 0.92 / TABLE.width;
     const unitByHeight = (stageHeight - topClearance - legReserve) / (nearPerUnit + farPerUnit);
-    const scale = Math.max(24, Math.min(110, unitByWidth, unitByHeight));
+    const scale = Math.max(compactLandscape ? 20 : 24, Math.min(110, unitByWidth, unitByHeight));
     const centerY = topClearance + farPerUnit * scale;
     const cardWidth = TABLE.cardWidth * scale;
     const cardHeight = TABLE.cardHeight * scale;

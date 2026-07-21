@@ -424,12 +424,15 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b'id="setting-deck-count"', room.data)
         self.assertIn(b'id="keybinds-overlay"', room.data)
         self.assertIn(b'id="keyboard-action-menu"', room.data)
+        self.assertIn(b"Rotate sideways for the best table view", room.data)
         self.assertIn(b"INVITE CODE", room.data)
 
         with app.open_resource("static/css/style.css") as css_file:
             css = css_file.read()
         self.assertIn(b".grid-rule-cell.chosen", css)
         self.assertIn(b".board-card.keyboard-focus", css)
+        self.assertIn(b"orientation: landscape", css)
+        self.assertIn(b".orientation-tip", css)
 
         with app.open_resource("static/js/shmamale.js") as js_file:
             game_js = js_file.read()
@@ -437,6 +440,7 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"selectKeyboardPlayer(Number(event.key))", game_js)
         self.assertIn(b'event.code === "Space"', game_js)
         self.assertIn(b'event.key === "Enter"', game_js)
+        self.assertIn(b'"(pointer: coarse)"', game_js)
 
         with app.open_resource("railway.json") as railway_file:
             railway_config = json.load(railway_file)

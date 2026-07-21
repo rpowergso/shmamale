@@ -1033,6 +1033,8 @@ input {
     width: 100%;
 }
 
+.orientation-tip { display: none; }
+
 /* Hard-right of the play area; table stays centered underneath */
 .side-panel {
     background: rgba(10, 14, 18, 0.88);
@@ -2487,4 +2489,87 @@ kbd {
     .burn-showdown-row {
         grid-template-columns: 26px minmax(0, 1fr) 56px;
     }
+}
+
+@media (max-width: 600px) and (orientation: portrait) {
+    .orientation-tip {
+        background: rgba(8, 12, 16, 0.88);
+        border: 1px solid rgba(255, 226, 116, 0.56);
+        border-radius: 999px;
+        bottom: 72px;
+        color: #ffe274;
+        display: block;
+        font-size: 0.62rem;
+        font-weight: 900;
+        left: 50%;
+        letter-spacing: 0.03em;
+        padding: 7px 12px;
+        pointer-events: none;
+        position: fixed;
+        text-align: center;
+        transform: translateX(-50%);
+        white-space: nowrap;
+        z-index: 59;
+    }
+}
+
+@media (max-width: 850px) and (orientation: landscape) {
+    .play-area {
+        padding: 2px 124px 2px 4px;
+    }
+
+    .table-3d,
+    .table-stage {
+        height: 100%;
+        min-height: 0;
+    }
+
+    .side-panel {
+        align-items: stretch;
+        bottom: 4px;
+        flex-direction: column;
+        left: auto;
+        padding: 6px;
+        position: absolute;
+        right: 4px;
+        top: 4px;
+        width: 116px;
+    }
+
+    .score-chips {
+        flex: 1;
+        flex-direction: column;
+        gap: 4px;
+        overflow-x: hidden;
+        overflow-y: auto;
+    }
+
+    .score-chip {
+        flex: 0 0 auto;
+        min-height: 29px;
+        padding: 4px 6px;
+        width: 100%;
+    }
+
+    .score-chip b { font-size: 0.82rem; }
+    .score-seat-label > i { flex-basis: 16px; height: 16px; }
+    .score-name { max-width: 48px; }
+
+    .call-btn {
+        flex: 0 0 auto;
+        min-height: 34px;
+        width: 100%;
+    }
+
+    .keyboard-action-menu {
+        bottom: 6px;
+        left: calc(50% - 60px);
+        max-width: 520px;
+        padding: 9px;
+        width: calc(100% - 150px);
+    }
+
+    .keyboard-menu-options { grid-template-columns: repeat(3, 1fr); }
+    .keyboard-menu-option { min-height: 48px; padding: 6px 8px; }
+    .keyboard-action-menu > p { display: none; }
 }
