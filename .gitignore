@@ -8,3 +8,4 @@ venv/
 *.log
 _revert_snippets/
 _patch_*.py
+artifacts/
