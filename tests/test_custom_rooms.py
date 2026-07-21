@@ -7,6 +7,7 @@ from game import (
     build_deck,
     can_opening_peek_slot,
     default_settings,
+    madhouse_settings,
     make_card,
     make_player,
     make_slot,
@@ -39,6 +40,29 @@ class CustomGridTests(unittest.TestCase):
         self.assertEqual((settings["grid_rows"], settings["grid_cols"]), (2, 2))
         self.assertEqual(settings["grid_peek_modes"], ["none", "none", "self", "self"])
         self.assertEqual(settings["joker_value"], -2)
+        self.assertEqual(settings["jokers"], 2)
+
+    def test_madhouse_preset_has_six_cards_right_peeks_and_six_jokers(self):
+        settings = madhouse_settings()
+        self.assertEqual(settings["preset"], "madhouse")
+        self.assertEqual((settings["grid_rows"], settings["grid_cols"]), (3, 2))
+        self.assertEqual(
+            settings["grid_peek_modes"],
+            ["seat_opponent", "seat_opponent", "none", "none", "self", "self"],
+        )
+        self.assertEqual(settings["opponent_peek_distance"], 1)
+        self.assertEqual(settings["opponent_peek_direction"], "right")
+        self.assertEqual(settings["jokers"], 6)
+
+        game = self.make_game()
+        game["settings"] = settings
+        self.assertTrue(can_opening_peek_slot(game, "a", "b", 0))
+        self.assertTrue(can_opening_peek_slot(game, "a", "b", 1))
+        self.assertFalse(can_opening_peek_slot(game, "a", "c", 0))
+        self.assertFalse(can_opening_peek_slot(game, "a", "a", 0))
+        self.assertFalse(can_opening_peek_slot(game, "a", "a", 2))
+        self.assertTrue(can_opening_peek_slot(game, "a", "a", 4))
+        self.assertTrue(can_opening_peek_slot(game, "a", "a", 5))
 
     def test_rectangular_grid_deals_requested_number_of_cards(self):
         game = self.make_game()
@@ -71,6 +95,13 @@ class CustomGridTests(unittest.TestCase):
         deck = build_deck(deck_count=1, jokers=2, joker_value=0)
         jokers = [item for item in deck if item["rank"] == "JOKER"]
         self.assertEqual([item["value"] for item in jokers], [0, 0])
+
+    def test_joker_setting_is_total_even_with_multiple_decks(self):
+        deck = build_deck(deck_count=2, jokers=6, joker_value=-2)
+        jokers = [item for item in deck if item["rank"] == "JOKER"]
+        self.assertEqual(len(deck), 110)
+        self.assertEqual(len(jokers), 6)
+        self.assertEqual(len({item["id"] for item in deck}), len(deck))
 
     def test_opening_peek_modes_are_mutually_exclusive_and_seat_aware(self):
         game = self.make_game()
@@ -205,6 +236,7 @@ class UnifiedLobbySocketTests(unittest.TestCase):
                     "opponent_peek_distance": 2,
                     "opponent_peek_direction": "right",
                     "joker_value": 0,
+                    "jokers": 7,
                 },
             )
             client.emit("add_bot", {"room": "LOBBY", "difficulty": "custom"})
@@ -214,6 +246,7 @@ class UnifiedLobbySocketTests(unittest.TestCase):
             self.assertEqual(game["settings"]["target_score"], 75)
             self.assertEqual((game["settings"]["grid_rows"], game["settings"]["grid_cols"]), (3, 2))
             self.assertEqual(game["settings"]["joker_value"], 0)
+            self.assertEqual(game["settings"]["jokers"], 7)
             self.assertEqual(game["settings"]["deck_count"], 1)
             self.assertEqual(game["players"][bot_sid]["difficulty"], "custom")
             self.assertEqual(
@@ -244,6 +277,29 @@ class UnifiedLobbySocketTests(unittest.TestCase):
 
             client.emit("update_settings", {"room": "LOBBY", "preset": "default"})
             self.assertEqual(game["settings"], default_settings())
+        finally:
+            client.disconnect()
+
+    def test_madhouse_preset_starts_with_six_cards_and_six_jokers(self):
+        client = socketio.test_client(app)
+        try:
+            client.emit("join", {"room": "LOBBY", "username": "Host"})
+            client.emit("update_settings", {"room": "LOBBY", "preset": "madhouse"})
+            game = rooms["LOBBY"]
+            self.assertEqual(game["settings"], madhouse_settings())
+
+            client.emit("add_bot", {"room": "LOBBY", "difficulty": "medium"})
+            client.emit("start_game", {"room": "LOBBY"})
+            self.assertEqual(game["status"], "playing")
+            self.assertTrue(all(len(player["board"]) == 6 for player in game["players"].values()))
+            all_cards = game["draw_pile"] + [
+                slot["card"]
+                for player in game["players"].values()
+                for slot in player["board"]
+                if slot
+            ]
+            self.assertEqual(len(all_cards), 58)
+            self.assertEqual(sum(card["rank"] == "JOKER" for card in all_cards), 6)
         finally:
             client.disconnect()
 
@@ -498,6 +554,10 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b'id="grid-rule-editor"', room.data)
         self.assertIn(b'id="add-bot-btn"', room.data)
         self.assertIn(b'id="setting-deck-count"', room.data)
+        self.assertIn(b'id="setting-jokers"', room.data)
+        self.assertIn(b'id="lobby-settings-toggle"', room.data)
+        self.assertIn(b'id="host-controls" class="room-settings hidden"', room.data)
+        self.assertIn(b'<option value="madhouse">Madhouse</option>', room.data)
         self.assertIn(b'id="keybinds-overlay"', room.data)
         self.assertIn(b'id="keyboard-action-menu"', room.data)
         self.assertIn(b'id="room-chat"', room.data)
@@ -511,6 +571,7 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b".board-card.keyboard-focus", css)
         self.assertIn(b"orientation: landscape", css)
         self.assertIn(b".orientation-tip", css)
+        self.assertIn(b".lobby-columns.settings-open", css)
 
         with app.open_resource("static/js/shmamale.js") as js_file:
             game_js = js_file.read()
@@ -526,6 +587,8 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b'"burn_attempt_registered"', game_js)
         self.assertIn(b"king-targeted", game_js)
         self.assertIn(b"delta_ms", game_js)
+        self.assertIn(b"function setLobbySettingsOpen", game_js)
+        self.assertIn(b"els.settingJokers", game_js)
 
         self.assertIn(b".board-card.king-targeted", css)
         self.assertIn(b".board-card.burn-attempt-pending", css)

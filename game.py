@@ -92,15 +92,15 @@ def build_deck(deck_count=1, jokers=2, joker_value=-2):
         for suit in SUITS:
             for rank in RANKS:
                 deck.append(make_card(rank, suit=suit, deck_number=deck_number))
-        for joker_number in range(1, jokers + 1):
-            deck.append(
-                make_card(
-                    "JOKER",
-                    deck_number=deck_number,
-                    joker_number=joker_number,
-                    joker_value=joker_value,
-                )
+    for joker_number in range(1, jokers + 1):
+        deck.append(
+            make_card(
+                "JOKER",
+                deck_number=1,
+                joker_number=joker_number,
+                joker_value=joker_value,
             )
+        )
     random.shuffle(deck)
     return deck
 
@@ -180,6 +180,29 @@ def default_settings():
         "deck_count": 1,
         "jokers": 2,
     }
+
+
+def madhouse_settings():
+    settings = default_settings()
+    settings.update(
+        {
+            "preset": "madhouse",
+            "grid_rows": 3,
+            "grid_cols": 2,
+            "grid_peek_modes": [
+                "seat_opponent",
+                "seat_opponent",
+                "none",
+                "none",
+                "self",
+                "self",
+            ],
+            "opponent_peek_distance": 1,
+            "opponent_peek_direction": "right",
+            "jokers": 6,
+        }
+    )
+    return settings
 
 
 def clamp_grid_dimension(value, fallback=2):

@@ -29,6 +29,7 @@ from game import (
     clear_burn_blockers,
     current_sid,
     default_settings,
+    madhouse_settings,
     deal_board,
     deal_penalty_card,
     discard_burned_card,
@@ -1425,6 +1426,10 @@ def on_update_settings(data):
         game["settings"] = default_settings()
         emit_state(room)
         return
+    if data.get("preset") == "madhouse":
+        game["settings"] = madhouse_settings()
+        emit_state(room)
+        return
 
     current = game["settings"]
     try:
@@ -1467,6 +1472,10 @@ def on_update_settings(data):
         deck_count = max(1, min(4, int(data.get("deck_count", current.get("deck_count", 1)))))
     except (TypeError, ValueError):
         deck_count = current.get("deck_count", 1)
+    try:
+        jokers = max(0, min(20, int(data.get("jokers", current.get("jokers", 2)))))
+    except (TypeError, ValueError):
+        jokers = current.get("jokers", 2)
     game["settings"].update(
         {
             "preset": "custom",
@@ -1478,6 +1487,7 @@ def on_update_settings(data):
             "opponent_peek_distance": distance,
             "opponent_peek_direction": direction,
             "deck_count": deck_count,
+            "jokers": jokers,
             "joker_value": joker_value,
         }
     )
@@ -1548,7 +1558,7 @@ def on_start_game(data):
     active_sids = active_player_sids(game)
     board_cards = board_size_from_settings(game["settings"]) * len(active_sids)
     deck_count = int(game["settings"].get("deck_count", 1))
-    cards_available = deck_count * (52 + int(game["settings"].get("jokers", 2)))
+    cards_available = deck_count * 52 + int(game["settings"].get("jokers", 2))
     if cards_available <= board_cards:
         emit_error("That grid needs more decks so at least one draw card remains.")
         return

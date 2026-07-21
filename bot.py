@@ -405,8 +405,9 @@ def initialize_bot_round_knowledge(game):
 def unknown_card_value(game):
     jokers = max(0, int(game["settings"].get("jokers", 2)))
     joker_value = int(game["settings"].get("joker_value", -2))
+    deck_count = max(1, int(game["settings"].get("deck_count", 1)))
     # Standard non-joker Shmamale deck totals 336 points.
-    return (336 + jokers * joker_value) / (52 + jokers)
+    return (336 * deck_count + jokers * joker_value) / (52 * deck_count + jokers)
 
 
 def known_card_info(game, observer_sid, owner_sid, index):

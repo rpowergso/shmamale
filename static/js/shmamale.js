@@ -34,6 +34,7 @@ let tableCameraCache = null;
 let seatLayoutCache = { key: "", positions: [] };
 let chatMessages = [];
 let chatUnread = 0;
+let lobbySettingsOpen = false;
 let localBurnAttempt = null;
 let localBurnAttemptTimer = null;
 let keyboardNav = {
@@ -221,6 +222,8 @@ function cacheEls() {
     els.lobby = document.getElementById("lobby");
     els.game = document.getElementById("game");
     els.playerList = document.getElementById("player-list");
+    els.lobbyColumns = document.getElementById("lobby-columns");
+    els.lobbySettingsToggle = document.getElementById("lobby-settings-toggle");
     els.hostControls = document.getElementById("host-controls");
     els.settingPreset = document.getElementById("setting-preset");
     els.settingTarget = document.getElementById("setting-target");
@@ -228,6 +231,7 @@ function cacheEls() {
     els.settingGridRows = document.getElementById("setting-grid-rows");
     els.settingGridCols = document.getElementById("setting-grid-cols");
     els.settingJokerValue = document.getElementById("setting-joker-value");
+    els.settingJokers = document.getElementById("setting-jokers");
     els.settingDeckCount = document.getElementById("setting-deck-count");
     els.settingPeekDistance = document.getElementById("setting-peek-distance");
     els.settingPeekDirection = document.getElementById("setting-peek-direction");
@@ -270,6 +274,11 @@ function cacheEls() {
 }
 
 function bindStaticEvents() {
+    if (els.lobbySettingsToggle) {
+        els.lobbySettingsToggle.addEventListener("click", () => {
+            setLobbySettingsOpen(!lobbySettingsOpen);
+        });
+    }
     if (els.readyBtn) {
         els.readyBtn.addEventListener("click", () => {
             ready = !ready;
@@ -282,8 +291,11 @@ function bindStaticEvents() {
 
     if (els.settingPreset) {
         els.settingPreset.addEventListener("change", () => {
-            if (els.settingPreset.value === "default") {
-                socket.emit("update_settings", { room: ROOM_ID, preset: "default" });
+            if (["default", "madhouse"].includes(els.settingPreset.value)) {
+                socket.emit("update_settings", {
+                    room: ROOM_ID,
+                    preset: els.settingPreset.value,
+                });
             } else {
                 emitRoomSettings();
             }
@@ -293,6 +305,7 @@ function bindStaticEvents() {
         els.settingTarget,
         els.settingWinCondition,
         els.settingJokerValue,
+        els.settingJokers,
         els.settingDeckCount,
         els.settingPeekDistance,
         els.settingPeekDirection,
@@ -688,6 +701,7 @@ function renderLobby() {
     els.settingGridRows.value = state.settings.grid_rows;
     els.settingGridCols.value = state.settings.grid_cols;
     els.settingJokerValue.value = state.settings.joker_value;
+    els.settingJokers.value = state.settings.jokers ?? 2;
     els.settingDeckCount.value = state.settings.deck_count || 1;
     els.settingPeekDistance.value = state.settings.opponent_peek_distance;
     els.settingPeekDirection.value = state.settings.opponent_peek_direction;
@@ -696,6 +710,7 @@ function renderLobby() {
     });
     renderPeekModeTools();
     renderGridRuleEditor();
+    setLobbySettingsOpen(lobbySettingsOpen);
 
     els.playerList.innerHTML = state.player_order.map((sid) => {
         const player = state.players[sid];
@@ -728,6 +743,18 @@ function renderLobby() {
         els.readyBtn.textContent = ready ? "NOT READY" : "READY UP";
         els.readyBtn.className = `btn ${ready ? "btn-red" : "btn-blue"}`;
         els.readyBtn.classList.toggle("hidden", botOnlyOpponents);
+    }
+}
+
+function setLobbySettingsOpen(open) {
+    lobbySettingsOpen = Boolean(open);
+    els.hostControls?.classList.toggle("hidden", !lobbySettingsOpen);
+    els.lobbyColumns?.classList.toggle("settings-open", lobbySettingsOpen);
+    if (els.lobbySettingsToggle) {
+        els.lobbySettingsToggle.setAttribute("aria-expanded", String(lobbySettingsOpen));
+        els.lobbySettingsToggle.textContent = lobbySettingsOpen
+            ? "CLOSE SETTINGS"
+            : "ROOM SETTINGS";
     }
 }
 
@@ -838,6 +865,7 @@ function emitRoomSettings(overrides = {}) {
         opponent_peek_distance: els.settingPeekDistance?.value ?? settings.opponent_peek_distance,
         opponent_peek_direction: els.settingPeekDirection?.value ?? settings.opponent_peek_direction,
         deck_count: els.settingDeckCount?.value ?? settings.deck_count,
+        jokers: els.settingJokers?.value ?? settings.jokers,
         joker_value: els.settingJokerValue?.value ?? settings.joker_value,
         ...overrides,
     });
