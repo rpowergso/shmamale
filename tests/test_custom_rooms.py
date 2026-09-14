@@ -595,7 +595,7 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"escapeHtml(message.message", game_js)
         self.assertIn(b'"burn_attempt_registered"', game_js)
         self.assertIn(b"king-targeted", game_js)
-        self.assertIn(b"burn_history", game_js)
+        self.assertIn(b"delta_ms", game_js)
         self.assertIn(b"function setLobbySettingsOpen", game_js)
         self.assertIn(b"els.settingJokers", game_js)
         self.assertIn(b'"sweat", "custom"', game_js)

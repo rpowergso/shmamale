@@ -4,10 +4,10 @@ const socket = (typeof io !== "undefined")
     ? io()
     : { emit() {}, on() {} };
 
-const ANIM_MS = 180;
-const PICKUP_ANIM_MS = 180;
-const CENTER_ANIM_MS = 180;
-const SWITCH_ANIM_MS = 180;
+const ANIM_MS = 520;
+const PICKUP_ANIM_MS = 520;
+const CENTER_ANIM_MS = 760;
+const SWITCH_ANIM_MS = 620;
 
 let mySid = "";
 let myUsername = "";
@@ -16,6 +16,7 @@ let prevState = null;
 let ready = false;
 let toastTimer = null;
 let lastActionKey = "";
+let animating = false;
 /** @type {{sid: string, index: number, untilTurnSid: string}|null} */
 let swapMark = null;
 let recentCardMarks = {
@@ -24,11 +25,10 @@ let recentCardMarks = {
     createdBySid: "",
     throughTurnSid: "",
 };
-let animationGeneration = 0;
-let keyboardFocusVisible = false;
-let suppressBurnClick = false;
+let stateUpdateQueue = Promise.resolve();
 let finalCountdownEndsAt = 0;
 let lastBurnShowdownId = 0;
+let burnShowdownTimer = null;
 let activeGridPeekMode = "self";
 let tableCameraCache = null;
 let seatLayoutCache = { key: "", positions: [] };
@@ -80,7 +80,6 @@ document.addEventListener("DOMContentLoaded", () => {
     window.addEventListener("orientationchange", handleViewportChange);
     window.visualViewport?.addEventListener("resize", handleViewportChange);
     window.visualViewport?.addEventListener("scroll", handleViewportChange);
-    document.addEventListener("scroll", layoutArLabels, true);
 });
 
 socket.on("connect", () => {
@@ -99,13 +98,15 @@ socket.on("disconnect", () => {
 });
 
 socket.on("game_state", (nextState) => {
-    applyGameState(nextState).catch((error) => console.error("State update failed", error));
+    stateUpdateQueue = stateUpdateQueue
+        .then(() => applyGameState(nextState))
+        .catch((error) => {
+            console.error("State update failed", error);
+            animating = false;
+        });
 });
 
 async function applyGameState(nextState) {
-    // Authoritative state never waits for a cosmetic animation.
-    const generation = ++animationGeneration;
-    document.querySelectorAll(".fly-card").forEach((card) => card.remove());
     if (nextState.viewer_sid) {
         mySid = nextState.viewer_sid;
     }
@@ -146,17 +147,25 @@ async function applyGameState(nextState) {
             const own = action.owner_sid === action.sid;
             showToast(own ? `${who} looked at a card.` : `${who} looked at someone's card.`);
         }
-        const burnResult = action.type === "burn" || action.type === "burn_fail";
-        render({ hideAnimTargets: !burnResult, action });
-        await playActionAnimation(action, anchors, generation);
-        if (generation === animationGeneration) render();
+        if (action.type === "burn_fail") {
+            const who = nextState.players[action.sid]?.username || "A player";
+            showToast(`${who} failed a burn and drew a penalty card.`);
+        }
+        if (action.type === "burn") {
+            const who = nextState.players[action.sid]?.username || "A player";
+            const owner = nextState.players[action.owner_sid]?.username || "a player";
+            const target = action.owner_sid === action.sid ? "their own card" : `${owner}'s card`;
+            showToast(`${who} burned ${target}.`);
+        }
+        render({ hideAnimTargets: true, action });
+        await playActionAnimation(action, anchors);
+        render();
         return;
     }
     render();
 }
 
 socket.on("error_message", (data) => {
-    clearLocalBurnAttempt();
     showToast(data.msg || "Something went wrong.");
 });
 
@@ -178,13 +187,14 @@ socket.on("chat_message", (message) => {
 
 socket.on("burn_attempt_registered", (data) => {
     markLocalBurnAttempt(data?.owner_sid, Number(data?.index), Number(data?.contest_window_ms));
+    showToast("Burn attempt registered — waiting for the server showdown…");
 });
 
 function updateSwapMark(action, nextState) {
     if (swapMark && nextState.current_turn_sid !== swapMark.untilTurnSid) {
         swapMark = null;
     }
-    if (action && action.type === "swap" && String(action.id) !== lastActionKey) {
+    if (action && action.type === "swap") {
         swapMark = {
             sid: action.sid,
             index: action.index,
@@ -454,14 +464,55 @@ function sendChatMessage(event) {
     els.chatInput.focus();
 }
 
-/** Use the browser's exact hit target for both upright and tilted cards. */
-function pileControlAtPoint(clientX, clientY) {
-    return document.elementFromPoint(clientX, clientY)?.closest?.(".pile-card, .prompt-label") || null;
+/** 3D CSS hit-tests are unreliable; resolve cards by stack + AABB fallback. */
+function pointInRect(clientX, clientY, el) {
+    if (!el) return false;
+    const r = el.getBoundingClientRect();
+    return clientX >= r.left && clientX <= r.right && clientY >= r.top && clientY <= r.bottom;
 }
 
-function cardAtPoint(clientX, clientY) {
-    // Browser hit testing follows actual transformed edges, not overlapping bounds.
-    return document.elementFromPoint(clientX, clientY)?.closest?.(".board-card") || null;
+function pileControlAtPoint(clientX, clientY) {
+    const stack = document.elementsFromPoint(clientX, clientY);
+    const fromStack = stack.find((el) => (
+        el.classList?.contains("pile-card")
+        || el.classList?.contains("prompt-label")
+    ));
+    if (fromStack) return fromStack;
+
+    const candidates = [
+        els.drawPrompt, els.drawBtn, els.takePrompt, els.playPrompt, els.discardBtn,
+    ].filter(Boolean);
+    return candidates.find((el) => !el.classList.contains("hidden") && pointInRect(clientX, clientY, el)) || null;
+}
+
+function cardAtPoint(clientX, clientY, tolerance = 0) {
+    // Piles sit in the middle — never treat them as board cards.
+    if (pileControlAtPoint(clientX, clientY)) return null;
+
+    const stack = document.elementsFromPoint(clientX, clientY);
+    const fromStack = stack.find((el) => el.classList?.contains("board-card"));
+    if (fromStack) return fromStack;
+
+    let best = null;
+    let bestDist = Infinity;
+    document.querySelectorAll(".board-card").forEach((card) => {
+        if (card.classList.contains("ability-picked-up")) return;
+        const r = card.getBoundingClientRect();
+        if (
+            clientX < r.left - tolerance
+            || clientX > r.right + tolerance
+            || clientY < r.top - tolerance
+            || clientY > r.bottom + tolerance
+        ) return;
+        const cx = (r.left + r.right) / 2;
+        const cy = (r.top + r.bottom) / 2;
+        const dist = (cx - clientX) ** 2 + (cy - clientY) ** 2;
+        if (dist < bestDist) {
+            bestDist = dist;
+            best = card;
+        }
+    });
+    return best;
 }
 
 function activatePileControl(el) {
@@ -488,26 +539,7 @@ function activatePileControl(el) {
 function bindCardPointerFallback() {
     const stage = document.querySelector(".table-stage") || document.body;
 
-    stage.addEventListener("pointerdown", (event) => {
-        suppressBurnClick = false;
-        keyboardFocusVisible = false;
-        refreshKeyboardFocusDom();
-        const card = event.target.closest?.(".board-card");
-        const slot = card && state?.players[card.dataset.owner]?.board?.[Number(card.dataset.index)];
-        if (event.button !== 0 || !slot || slot.empty || !canAttemptBoardBurn()
-            || canOpeningPeek(card.dataset.owner, Number(card.dataset.index), slot)) return;
-        event.preventDefault();
-        suppressBurnClick = true;
-        burnCard(card.dataset.owner, Number(card.dataset.index));
-    });
-
     stage.addEventListener("click", (event) => {
-        if (event.detail > 0 && suppressBurnClick) {
-            suppressBurnClick = false;
-            event.preventDefault();
-            event.stopPropagation();
-            return;
-        }
         if (event.target.closest?.(".held-actions, .overlay-card, .btn:not(.pile-card):not(.prompt-label), a")) {
             return;
         }
@@ -760,14 +792,11 @@ function renderGridRuleEditor() {
 }
 
 function renderGame(options = {}) {
-    els.game.classList.toggle("readable-table", usesReadableTable());
     normalizeKeyboardFocus();
     const current = state.players[state.current_turn_sid];
     const myTurn = state.current_turn_sid === mySid;
     els.turnText.textContent = myTurn ? "YOUR TURN" : `${current ? current.username.toUpperCase() : "WAITING"}'S TURN`;
     els.turnText.style.color = myTurn ? "#2ecc71" : "#f1c40f";
-    if (state.status === "round_over") els.turnText.textContent = "ROUND OVER";
-    if (state.status === "game_over") els.turnText.textContent = "GAME OVER";
     els.phaseText.textContent = phaseText();
 
     renderScores();
@@ -818,7 +847,7 @@ function renderScores() {
 
 function renderCallBtn() {
     const canChoose = canChooseNow();
-    els.callBtn.disabled = !canChoose || Boolean(state.pending_burn);
+    els.callBtn.disabled = !canChoose || Boolean(state.pending_burn) || animating;
     els.callBtn.textContent = state.first_caller_sid ? "PROTECT" : "CALL";
 }
 
@@ -961,7 +990,7 @@ function moveKeyboardCard(dx, dy) {
 function refreshKeyboardFocusDom() {
     document.querySelectorAll(".board-card.keyboard-focus").forEach((card) => card.classList.remove("keyboard-focus"));
     document.querySelectorAll(".seat.keyboard-target, .nameplate.keyboard-target").forEach((item) => item.classList.remove("keyboard-target"));
-    if (!keyboardFocusVisible || !keyboardNav.ownerSid) return;
+    if (!keyboardNav.ownerSid) return;
     const owner = CSS.escape(keyboardNav.ownerSid);
     const card = document.querySelector(`.board-card[data-owner="${owner}"][data-index="${keyboardNav.index}"]`);
     if (card && !card.classList.contains("empty")) card.classList.add("keyboard-focus");
@@ -1018,7 +1047,7 @@ function moveKeyboardMenu(delta) {
 }
 
 function confirmKeyboardMenuAction() {
-    if (!keyboardNav.menuOpen || !canChooseNow()) return;
+    if (!keyboardNav.menuOpen || !canChooseNow() || animating) return;
     const action = keyboardMenuActions()[keyboardNav.menuIndex];
     if (!action?.enabled) return;
     keyboardNav.menuOpen = false;
@@ -1069,9 +1098,6 @@ function handleGameKeydown(event) {
         }
         return;
     }
-    if (/^[1-6wasd]$/.test(key) || event.key.startsWith("Arrow") || event.code === "Space") {
-        keyboardFocusVisible = true;
-    }
     if (/^[1-6]$/.test(event.key)) {
         event.preventDefault();
         selectKeyboardPlayer(Number(event.key));
@@ -1103,6 +1129,7 @@ function handleGameKeydown(event) {
     }
     if (event.key === "Enter") {
         event.preventDefault();
+        if (animating) return;
         if (keyboardNav.menuOpen) {
             confirmKeyboardMenuAction();
         } else if (holdingMyDraw() && state.pending_draw.source === "draw") {
@@ -1123,11 +1150,28 @@ function playerIsHolding(sid) {
     return Boolean(state.pending_draw && state.pending_draw.sid === sid);
 }
 
-function renderPiles() {
-    // Show the authoritative discard immediately, including during card flights.
-    const visibleDiscard = state.discard_top;
-    els.drawCount.textContent = String(state.draw_count);
-    els.discardCount.textContent = String(state.discard_count);
+function renderPiles(options = {}) {
+    const keepPreviousDiscard = Boolean(
+        options.hideAnimTargets
+        && prevState
+        && (
+            options.action?.type === "swap"
+            || options.action?.type === "play"
+            || options.action?.type === "burn"
+        )
+    );
+    const keepPreviousDraw = Boolean(
+        options.hideAnimTargets
+        && prevState
+        && options.action?.type === "burn_fail"
+        && options.action?.penalty
+    );
+    const visibleDiscard = keepPreviousDiscard ? prevState.discard_top : state.discard_top;
+    const visibleDiscardCount = keepPreviousDiscard ? prevState.discard_count : state.discard_count;
+    const visibleDrawCount = keepPreviousDraw ? prevState.draw_count : state.draw_count;
+
+    els.drawCount.textContent = String(visibleDrawCount);
+    els.discardCount.textContent = String(visibleDiscardCount);
 
     const choose = canChooseNow();
     const holding = holdingMyDraw();
@@ -1167,11 +1211,6 @@ function layoutArLabels() {
             return;
         }
         const r = cardEl.getBoundingClientRect();
-        const viewport = document.querySelector(".play-area").getBoundingClientRect();
-        if (r.bottom < viewport.top || r.top > viewport.bottom) {
-            btn.classList.remove("is-placed");
-            return;
-        }
         const cx = r.left + r.width / 2 + xOffset;
         const top = r.top - 8;
         btn.style.left = `${(cx - overlayRect.left).toFixed(2)}px`;
@@ -1193,6 +1232,7 @@ function layoutArLabels() {
 }
 
 function tryDraw() {
+    if (animating) return;
     if (!state || state.status !== "playing") return;
     if (state.phase !== "choose" || state.current_turn_sid !== mySid) {
         showToast("Wait for your turn to draw.");
@@ -1210,6 +1250,7 @@ function tryDraw() {
 }
 
 function tryTake() {
+    if (animating) return;
     if (!canChooseNow() || !state.discard_top) return;
     socket.emit("take_discard", { room: ROOM_ID });
 }
@@ -1364,11 +1405,6 @@ function projectWorldPoint(x, y) {
  * CSS rotateZ whose local "top" points from the seat toward table center.
  * Uses clientWidth/Height (unprojected), never getBoundingClientRect().
  */
-function usesReadableTable() {
-    return Number(state?.settings?.grid_cols) > 2 || Number(state?.settings?.grid_rows) > 2
-        || (state?.player_order?.length || 0) > 2 || window.innerWidth < 760;
-}
-
 function gridColsForBoard(boardLength) {
     const configured = Number(state?.settings?.grid_cols);
     if (configured >= 2 && configured <= 4) return configured;
@@ -1677,19 +1713,9 @@ function seatLayout(order) {
 }
 
 function renderSeats(options = {}) {
-    els.game.classList.toggle("readable-table", usesReadableTable());
-    if (usesReadableTable()) {
-        const order = rotatedOrder();
-        const pose = { left: 0, top: 0, yaw: 0, scale: 1, ring: 0, worldX: 0, worldY: 0 };
-        els.seats.innerHTML = order.map((sid) => renderSeat(sid, pose, options)).join("");
-        els.seats.dataset.count = String(order.length);
-        els.hands.innerHTML = "";
-        els.nameplates.innerHTML = "";
-        return;
-    }
     applyTableCameraSettings();
     const order = rotatedOrder();
-    const layoutKey = `${state.settings?.grid_cols}:${state.settings?.grid_rows}|` + order.map((sid) => (
+    const layoutKey = order.map((sid) => (
         `${sid}:${state.players[sid]?.board?.length || 0}`
     )).join("|");
     if (seatLayoutCache.key !== layoutKey) {
@@ -1723,7 +1749,6 @@ function renderHands(order, options = {}) {
 }
 
 function layoutHands(order) {
-    if (usesReadableTable()) return;
     if (!els.hands) return;
     const stage = document.querySelector(".table-stage");
     if (!stage) return;
@@ -1761,8 +1786,8 @@ function renderNameplates(order, positions) {
         const classes = ["nameplate"];
         if (isMe) classes.push("me");
         if (player.protected) classes.push("protected");
-        if (state.status === "playing" && sid === state.current_turn_sid) classes.push("current-turn");
-        if (keyboardFocusVisible && sid === keyboardNav.ownerSid) classes.push("keyboard-target");
+        if (sid === state.current_turn_sid) classes.push("current-turn");
+        if (sid === keyboardNav.ownerSid) classes.push("keyboard-target");
         const keyboardNumber = keyboardPlayerOrder().indexOf(sid) + 1;
         const badges = [
             keyboardNumber > 0 ? `<span class="badge key-badge">${keyboardNumber}</span>` : "",
@@ -1786,7 +1811,6 @@ function renderNameplates(order, positions) {
 
 /** Snap each nameplate onto the radial line from table center, entirely outside the oval. */
 function layoutNameplates(order) {
-    if (usesReadableTable()) return;
     const stage = document.querySelector(".table-stage");
     if (!stage || !els.nameplates) return;
     const stageRect = stage.getBoundingClientRect();
@@ -1829,7 +1853,6 @@ function layoutNameplates(order) {
 
 /** Legs are screen-space furniture attached to the projected lower ellipse. */
 function layoutTableLegs() {
-    if (usesReadableTable()) return;
     const stage = document.querySelector(".table-stage");
     const table3d = document.querySelector(".table-3d");
     const legs = document.querySelector(".table-legs");
@@ -1945,8 +1968,8 @@ function renderSeat(sid, position, options = {}) {
     if (isMe) classes.push("me");
     if (player.protected) classes.push("protected");
     if (player.eliminated) classes.push("spectator-seat");
-    if (state.status === "playing" && sid === state.current_turn_sid) classes.push("current-turn");
-    if (keyboardFocusVisible && sid === keyboardNav.ownerSid) classes.push("keyboard-target");
+    if (sid === state.current_turn_sid) classes.push("current-turn");
+    if (sid === keyboardNav.ownerSid) classes.push("keyboard-target");
 
     const hideSlot = options.hideAnimTargets && options.action
         && options.action.type === "swap"
@@ -1993,9 +2016,7 @@ function renderSeat(sid, position, options = {}) {
     const hideBotHeld = options.hideAnimTargets && options.action
         && (options.action.type === "draw" || options.action.type === "take")
         && options.action.sid === sid;
-    const botHeld = usesReadableTable()
-        ? `<div class="seat-hand">${renderHeldSlot(sid, { hidden: hideBotHeld })}</div>`
-        : player.is_bot
+    const botHeld = player.is_bot
         ? renderBotHeldSlot(sid, { hidden: hideBotHeld })
         : "";
 
@@ -2015,10 +2036,9 @@ function renderSeat(sid, position, options = {}) {
 
     return `
         <section class="${classes.join(" ")}" style="${style}" data-sid="${sid}">
-            ${usesReadableTable() ? `<header class="seat-heading"><strong>${escapeHtml(player.username)}${isMe ? " · You" : ""}</strong><span>${player.eliminated ? "Spectating" : player.called ? "Called" : state.status === "playing" && sid === state.current_turn_sid ? "Turn" : player.is_bot ? "Bot" : ""}</span></header>` : ""}
             <div class="seat-scale">
                 <div class="seat-board">
-                    <div class="card-grid cols-${cols}" data-grid="${sid}" style="--board-cols:${cols};grid-template-columns:repeat(${cols}, minmax(0, 1fr))">${cards}</div>
+                    <div class="card-grid cols-${cols}" data-grid="${sid}" style="grid-template-columns:repeat(${cols}, 1fr)">${cards}</div>
                     ${botHeld}
                 </div>
             </div>
@@ -2167,7 +2187,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     if (looked) classes.push("looked-mark");
     if (switched) classes.push("switched-mark");
     if (opening) classes.push("opening-peek");
-    if (keyboardFocusVisible && ownerSid === keyboardNav.ownerSid && index === keyboardNav.index) classes.push("keyboard-focus");
+    if (ownerSid === keyboardNav.ownerSid && index === keyboardNav.index) classes.push("keyboard-focus");
     if (options.hidden) classes.push("anim-hidden");
     if (isClickable(ownerSid, index, slot) || opening) classes.push("selectable");
 
@@ -2175,7 +2195,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
         ? cardFaceHtml(slot.card)
         : "";
 
-    return `<button type="button" class="${classes.join(" ")}" data-owner="${ownerSid}" data-index="${index}" aria-label="${escapeHtml(state.players[ownerSid].username)}, card ${index + 1}${slot.faceUp && slot.card ? `, ${escapeHtml(slot.card.label)}` : ", face down"}">${html}</button>`;
+    return `<button type="button" class="${classes.join(" ")}" data-owner="${ownerSid}" data-index="${index}">${html}</button>`;
 }
 
 function canOpeningPeek(ownerSid, index, slot) {
@@ -2196,7 +2216,7 @@ function shouldHighlightSlot(ownerSid, index) {
 }
 
 function isClickable(ownerSid, index, slot) {
-    if (slot.empty) return false;
+    if (slot.empty || animating) return false;
     if (state.players[mySid]?.called || state.players[mySid]?.eliminated) return false;
 
     if (canOpeningPeek(ownerSid, index, slot)) return true;
@@ -2244,7 +2264,7 @@ function isSelectedByAbility(ownerSid, index) {
 }
 
 function cardClicked(ownerSid, index) {
-    if (!state) return;
+    if (!state || animating) return;
     if (state.players[mySid]?.eliminated) {
         showToast("You are spectating this game.");
         return;
@@ -2298,7 +2318,12 @@ function cardClicked(ownerSid, index) {
             showToast("That discard has already had a card burned on it.");
             return;
         }
-        burnCard(ownerSid, index);
+        socket.emit("burn_card", {
+            room: ROOM_ID,
+            owner_sid: ownerSid,
+            index,
+            discard_id: state.discard_top?.id || null,
+        });
         return;
     }
 
@@ -2444,13 +2469,9 @@ function renderAbilityOverlay() {
     if (!els.abilityOverlay) return;
     els.abilityOverlay.classList.remove("pass-through");
 
-    const results = document.getElementById("round-results");
-    const roundOver = state.status === "round_over" || state.status === "game_over";
-    results.classList.toggle("hidden", !roundOver);
-    results.innerHTML = roundOver ? renderRoundOverHtml() : "";
-    if (roundOver) {
-        els.abilityOverlay.classList.add("hidden");
-        els.abilityOverlay.innerHTML = "";
+    if (state.status === "round_over" || state.status === "game_over") {
+        els.abilityOverlay.classList.remove("hidden");
+        els.abilityOverlay.innerHTML = renderRoundOverHtml();
         return;
     }
 
@@ -2723,32 +2744,72 @@ function heldWorldAnchor(sid) {
 }
 
 function burnShowdownHtml(showdown) {
-    const attempts = (showdown.attempts || []).slice().sort((a, b) => a.time_ms - b.time_ms);
+    const attempts = (showdown.attempts || [])
+        .slice()
+        .sort((a, b) => a.time_ms - b.time_ms);
     const rows = attempts.map((attempt, index) => {
-        const result = { winner: "Correct burn", late: "Late · penalty", miss: "Wrong · penalty", cancelled: "Cancelled" }[attempt.result] || "Pending";
-        const status = attempt.result === "winner" ? "winner" : ["late", "miss"].includes(attempt.result) ? "loser" : "";
-        const gap = index ? `+${attempt.time_ms - attempts[index - 1].time_ms} ms` : "First";
-        return `<div class="burn-showdown-row ${status}">
-            <span class="burn-showdown-place">${index + 1}</span>
-            <span class="burn-showdown-player"><strong>${escapeHtml(state.players[attempt.sid]?.username || "Player")}</strong><small>${result}</small></span>
-            <span class="burn-timing"><b>${attempt.time_ms} ms</b><small>${gap}</small></span>
-        </div>`;
+        const name = state.players[attempt.sid]?.username || "Player";
+        let result = "Attempt";
+        if (attempt.sid === showdown.winner_sid) result = "First valid burn";
+        else if (attempt.result === "late") result = "Late burn · penalty card";
+        else if (attempt.result === "miss") result = "Wrong burn · penalty card";
+        else if (attempt.result === "cancelled") result = "Attempt cancelled";
+        const delta = Number(attempt.delta_ms) || 0;
+        const deltaLabel = `${delta > 0 ? "+" : ""}${delta}ms`;
+        return `
+            <div class="burn-showdown-row ${attempt.sid === showdown.winner_sid ? "winner" : "loser"}" style="--race-order:${index}">
+                <span class="burn-showdown-place">${index + 1}</span>
+                <span class="burn-showdown-player"><strong>${escapeHtml(name)}</strong><small>${result}</small></span>
+                <b>${escapeHtml(deltaLabel)}</b>
+            </div>
+        `;
     }).join("");
-    return `<div class="burn-showdown-card"><div class="burn-showdown-kicker">${escapeHtml(showdown.discard_card?.label || "Discard")} · placed at 0 ms</div><div class="burn-showdown-list">${rows}</div></div>`;
+    const card = showdown.discard_card?.label || "discard";
+    const winnerAttempt = attempts.find((attempt) => attempt.sid === showdown.winner_sid);
+    const winnerName = showdown.winner_sid
+        ? state.players[showdown.winner_sid]?.username || "Player"
+        : "";
+    const target = showdown.winner_target || {};
+    const ownerName = state.players[target.owner_sid]?.username || "a player";
+    const targetLabel = target.card?.label || "card";
+    const targetText = target.owner_sid === showdown.winner_sid
+        ? `their own ${targetLabel}`
+        : `${ownerName}'s ${targetLabel}`;
+    const winningSeconds = (Math.max(0, winnerAttempt?.time_ms || 0) / 1000).toFixed(2);
+    const isRace = attempts.length > 1;
+    const heading = showdown.winner_sid
+        ? `<h2><span>${escapeHtml(winnerName)}</span> burned ${escapeHtml(targetText)}</h2>`
+        : "<h2>No burn landed</h2>";
+    const reaction = showdown.winner_sid
+        ? `<div class="burn-winning-time">${winningSeconds}s<small>SERVER REACTION</small></div>`
+        : "";
+    return `
+        <div class="burn-showdown-card">
+            <div class="burn-impact" aria-hidden="true">${isRace ? "SHOWDOWN!" : "BURN!"}</div>
+            <div class="burn-showdown-kicker">${isRace ? "SERVER BURN SHOWDOWN" : "BURN CONFIRMED"} · ${escapeHtml(card)}</div>
+            ${heading}
+            ${reaction}
+            <div class="burn-showdown-list">${rows}</div>
+        </div>
+    `;
 }
 
 function renderBurnShowdown() {
-    if (!els.burnShowdown) return;
-    const history = state.burn_history || (state.burn_showdown ? [state.burn_showdown] : []);
-    // Keep all attempts on the same discard together, including all-miss contests.
-    const groups = [];
-    for (const result of history) {
-        let group = groups.find((item) => item.discard_card?.id === result.discard_card?.id && item.placed_at === result.placed_at);
-        if (!group) { group = { ...result, attempts: [] }; groups.push(group); }
-        group.attempts.push(...result.attempts);
+    if (!els.burnShowdown || !state?.burn_showdown) return;
+    const showdown = state.burn_showdown;
+    if (showdown.id === lastBurnShowdownId) {
+        if (!els.burnShowdown.classList.contains("hidden")) {
+            els.burnShowdown.innerHTML = burnShowdownHtml(showdown);
+        }
+        return;
     }
-    lastBurnShowdownId = state.burn_showdown?.id || 0;
-    els.burnShowdown.innerHTML = `<h2>Burn order</h2><p class="burn-help">Time since placement · gap from previous attempt</p>${groups.reverse().map(burnShowdownHtml).join("") || '<p class="burn-empty">Burn attempts will appear here.</p>'}`;
+    lastBurnShowdownId = showdown.id;
+    els.burnShowdown.innerHTML = burnShowdownHtml(showdown);
+    els.burnShowdown.classList.remove("hidden");
+    if (burnShowdownTimer) window.clearTimeout(burnShowdownTimer);
+    burnShowdownTimer = window.setTimeout(() => {
+        els.burnShowdown.classList.add("hidden");
+    }, (showdown.attempts || []).length > 1 ? 6500 : 4500);
 }
 
 function captureAnchors() {
@@ -2763,8 +2824,8 @@ function captureAnchors() {
             y: r.top + (r.height - sized.h) / 2,
             w: sized.w,
             h: sized.h,
-            yaw: usesReadableTable() ? 0 : yaw,
-            world: usesReadableTable() ? null : world,
+            yaw,
+            world,
         };
     };
     const out = {
@@ -2857,11 +2918,9 @@ function flyCardOnPlane({
             el.style.transform = `translate3d(${x * scale}px, ${y * scale}px, ${lift}px) translate(-50%, -50%) rotateZ(${yaw}deg) rotateX(${tilt}deg)`;
         };
         setPose(start.x, start.y, start.yaw || 0, start.tilt || 0, 2);
-        const generation = animationGeneration;
         const t0 = performance.now();
 
         function frame(now) {
-            if (generation !== animationGeneration) { el.remove(); resolve(); return; }
             const t = Math.min(1, (now - t0) / duration);
             const e = easeInOutCubic(t);
             const x = start.x + (end.x - start.x) * e;
@@ -2926,7 +2985,6 @@ function flyCard({
         el.style.transform = `rotateZ(${yaw0}deg)`;
         els.flyLayer.appendChild(el);
 
-        const generation = animationGeneration;
         const t0 = performance.now();
         const x0 = from.x;
         const y0 = from.y;
@@ -2935,7 +2993,6 @@ function flyCard({
         const midLift = -Math.min(28, Math.hypot(x1 - x0, y1 - y0) * 0.06);
 
         function frame(now) {
-            if (generation !== animationGeneration) { el.remove(); resolve(); return; }
             const t = Math.min(1, (now - t0) / duration);
             const e = easeInOutCubic(t);
             const x = x0 + (x1 - x0) * e;
@@ -2971,7 +3028,7 @@ function destHeld(sid, afterAnchors) {
     const held = afterAnchors.held[sid];
     if (held?.world) return held;
     // Prefer a real held-card rect; ignore tiny/warped AABBs from hidden trays.
-    if (held && (usesReadableTable() || (held.w >= 40 && held.h >= 50))) return held;
+    if (held && held.w >= 40 && held.h >= 50) return held;
 
     const seat = afterAnchors.seats[sid];
     if (seat) {
@@ -2990,11 +3047,13 @@ function destHeld(sid, afterAnchors) {
 function destBoard(sid, index, afterAnchors) {
     const slot = afterAnchors.boards[sid] && afterAnchors.boards[sid][index];
     if (slot?.world) return slot;
-    if (slot && (usesReadableTable() || (slot.w >= 30 && slot.h >= 40))) return slot;
+    if (slot && slot.w >= 30 && slot.h >= 40) return slot;
     return destHeld(sid, afterAnchors);
 }
 
-async function playActionAnimation(action, beforeAnchors, generation = animationGeneration) {
+async function playActionAnimation(action, beforeAnchors) {
+    animating = true;
+    const safety = setTimeout(() => { animating = false; }, 6000);
     const after = captureFullAnchors();
     const before = beforeAnchors || {};
     const srcDraw = before.draw || after.draw;
@@ -3054,9 +3113,35 @@ async function playActionAnimation(action, beforeAnchors, generation = animation
                 duration: CENTER_ANIM_MS,
             });
         } else if (action.type === "burn_fail") {
-            // Reveal the miss immediately; only the penalty card needs to travel.
+            const attemptedFrom = before.boards?.[action.owner_sid]?.[action.index]
+                || destBoard(action.owner_sid, action.index, after);
+            const discardTarget = after.discard || srcDiscard;
+            const returnTarget = destBoard(action.owner_sid, action.index, after);
+            await flyCard({
+                from: attemptedFrom,
+                to: discardTarget,
+                html: faceUpHtml(action.card),
+                className: "failed-burn-flight",
+                duration: CENTER_ANIM_MS,
+                lingerMs: 850,
+                statusText: "Failed Burn",
+            });
+            await flyCard({
+                from: discardTarget,
+                to: returnTarget,
+                html: faceUpHtml(action.card),
+                className: "failed-burn-return",
+                duration: SWITCH_ANIM_MS,
+            });
             if (action.penalty) {
-                await flyCard({ from: srcDraw, to: destBoard(action.sid, action.penalty.index, after), html: faceDownHtml(), duration: PICKUP_ANIM_MS });
+                const penaltyTarget = destBoard(action.sid, action.penalty.index, after);
+                await flyCard({
+                    from: srcDraw,
+                    to: penaltyTarget,
+                    html: faceDownHtml(),
+                    className: "penalty-card-flight",
+                    duration: PICKUP_ANIM_MS,
+                });
             }
         } else if (action.type === "burn_give") {
             const from = before.boards?.[action.sid]?.[action.give_index]
@@ -3108,9 +3193,9 @@ async function playActionAnimation(action, beforeAnchors, generation = animation
             await wait(ANIM_MS * 0.35);
         }
     } finally {
-        if (generation === animationGeneration) {
-            document.querySelectorAll(".anim-hidden").forEach((el) => el.classList.remove("anim-hidden"));
-        }
+        clearTimeout(safety);
+        animating = false;
+        document.querySelectorAll(".anim-hidden").forEach((el) => el.classList.remove("anim-hidden"));
     }
 }
 
@@ -3126,20 +3211,7 @@ function burnFromPeek() {
     socket.emit("burn_from_peek", { room: ROOM_ID });
 }
 
-function canAttemptBoardBurn(inspection = false) {
-    return state?.status === "playing" && state.discard_top && state.discard_burn_available
-        && !state.pending_burn && !holdingMyDraw()
-        && (inspection || !(state.pending_ability?.sid === mySid && state.phase === "ability"))
-        && !state.players[mySid]?.called && !state.players[mySid]?.eliminated;
-}
-
 function burnCard(ownerSid, index) {
-    const slot = state?.players[ownerSid]?.board?.[index];
-    const inspection = state?.pending_ability?.sid === mySid
-        && state.pending_ability.type === "switch_peek"
-        && isSelectedByAbility(ownerSid, index);
-    if (!canAttemptBoardBurn(inspection) || localBurnAttempt || !slot || slot.empty || isBurnBlocked(ownerSid, index) || canOpeningPeek(ownerSid, index, slot)) return;
-    markLocalBurnAttempt(ownerSid, index, 120);
     socket.emit("burn_card", {
         room: ROOM_ID,
         owner_sid: ownerSid,
