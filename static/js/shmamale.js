@@ -454,43 +454,14 @@ function sendChatMessage(event) {
     els.chatInput.focus();
 }
 
+/** Use the browser's exact hit target for both upright and tilted cards. */
 function pileControlAtPoint(clientX, clientY) {
-    const direct = document.elementFromPoint(clientX, clientY)?.closest?.(".pile-card, .prompt-label");
-    if (direct) return direct;
-    // The isolated center piles also need a fallback on the tilted plane.
-    return [els.drawPrompt, els.drawBtn, els.takePrompt, els.playPrompt, els.discardBtn]
-        .find(el => el && !el.classList.contains("hidden") && (() => {
-            const r = el.getBoundingClientRect();
-            return r.width > 0 && r.height > 0 && clientX >= r.left && clientX <= r.right
-                && clientY >= r.top && clientY <= r.bottom;
-        })()) || null;
+    return document.elementFromPoint(clientX, clientY)?.closest?.(".pile-card, .prompt-label") || null;
 }
 
 function cardAtPoint(clientX, clientY) {
-    if (pileControlAtPoint(clientX, clientY)) return null;
-    const hit = document.elementFromPoint(clientX, clientY);
-    const direct = hit?.closest?.(".board-card");
-    if (direct) return direct;
-    if (hit?.closest?.(".held-slot, .nameplate, .game-rail, .overlay-card, .pile-card, .prompt-label")) return null;
-    // Chromium can miss the near half of a perspective plane. Test the actual
-    // projected quadrilateral, never the overlapping bounding rectangles.
-    const stageRect = document.querySelector(".table-stage").getBoundingClientRect();
-    for (const card of document.querySelectorAll(".board-card:not(.anim-hidden):not(.ability-picked-up)")) {
-        const rect = card.getBoundingClientRect();
-        if (clientX < rect.left || clientX > rect.right || clientY < rect.top || clientY > rect.bottom) continue;
-        const frame = seatWorldFrame(card.dataset.owner);
-        const center = boardWorldAnchor(card.dataset.owner, Number(card.dataset.index));
-        if (!frame || !center) continue;
-        const polygon = [[-1,-1],[1,-1],[1,1],[-1,1]].map(([x,y]) => {
-            const dx = x * TABLE.cardWidth * frame.scale / 2;
-            const dy = y * TABLE.cardHeight * frame.scale / 2;
-            const projected = projectWorldPoint(center.x + frame.tangent.x * dx + frame.outward.x * dy,
-                center.y + frame.tangent.y * dx + frame.outward.y * dy);
-            return { x: stageRect.left + projected.x, y: stageRect.top + projected.y };
-        });
-        if (pointInsidePolygon({x: clientX, y: clientY}, polygon)) return card;
-    }
-    return null;
+    // Browser hit testing follows actual transformed edges, not overlapping bounds.
+    return document.elementFromPoint(clientX, clientY)?.closest?.(".board-card") || null;
 }
 
 function activatePileControl(el) {
@@ -515,13 +486,13 @@ function activatePileControl(el) {
 }
 
 function bindCardPointerFallback() {
-    const stage = document.querySelector(".play-area") || document.body;
+    const stage = document.querySelector(".table-stage") || document.body;
 
     stage.addEventListener("pointerdown", (event) => {
         suppressBurnClick = false;
         keyboardFocusVisible = false;
         refreshKeyboardFocusDom();
-        const card = cardAtPoint(event.clientX, event.clientY);
+        const card = event.target.closest?.(".board-card");
         const slot = card && state?.players[card.dataset.owner]?.board?.[Number(card.dataset.index)];
         if (event.button !== 0 || !slot || slot.empty || !canAttemptBoardBurn()
             || canOpeningPeek(card.dataset.owner, Number(card.dataset.index), slot)) return;
@@ -549,7 +520,8 @@ function bindCardPointerFallback() {
             return;
         }
 
-        const card = cardAtPoint(event.clientX, event.clientY);
+        const touchTolerance = window.matchMedia?.("(pointer: coarse)")?.matches ? 10 : 0;
+        const card = cardAtPoint(event.clientX, event.clientY, touchTolerance);
         if (!card || card.classList.contains("empty")) return;
         const owner = card.getAttribute("data-owner");
         const index = Number(card.getAttribute("data-index"));
@@ -788,6 +760,7 @@ function renderGridRuleEditor() {
 }
 
 function renderGame(options = {}) {
+    els.game.classList.toggle("readable-table", usesReadableTable());
     normalizeKeyboardFocus();
     const current = state.players[state.current_turn_sid];
     const myTurn = state.current_turn_sid === mySid;
@@ -1391,6 +1364,11 @@ function projectWorldPoint(x, y) {
  * CSS rotateZ whose local "top" points from the seat toward table center.
  * Uses clientWidth/Height (unprojected), never getBoundingClientRect().
  */
+function usesReadableTable() {
+    return Number(state?.settings?.grid_cols) > 2 || Number(state?.settings?.grid_rows) > 2
+        || (state?.player_order?.length || 0) > 2 || window.innerWidth < 760;
+}
+
 function gridColsForBoard(boardLength) {
     const configured = Number(state?.settings?.grid_cols);
     if (configured >= 2 && configured <= 4) return configured;
@@ -1414,8 +1392,11 @@ function boardShape(sid) {
     return { boardLength, cols, rows, boardWidth, boardHeight };
 }
 
-function heldPlacementFor() {
-    return "side";
+function heldPlacementFor(sid) {
+    const shape = boardShape(sid);
+    const crowdedTable = (state?.player_order?.length || 0) >= 5;
+    const narrowScreen = window.innerWidth < 760;
+    return shape.cols >= 4 || crowdedTable || narrowScreen ? "below" : "side";
 }
 
 function boardGrowthScale(sid) {
@@ -1696,6 +1677,16 @@ function seatLayout(order) {
 }
 
 function renderSeats(options = {}) {
+    els.game.classList.toggle("readable-table", usesReadableTable());
+    if (usesReadableTable()) {
+        const order = rotatedOrder();
+        const pose = { left: 0, top: 0, yaw: 0, scale: 1, ring: 0, worldX: 0, worldY: 0 };
+        els.seats.innerHTML = order.map((sid) => renderSeat(sid, pose, options)).join("");
+        els.seats.dataset.count = String(order.length);
+        els.hands.innerHTML = "";
+        els.nameplates.innerHTML = "";
+        return;
+    }
     applyTableCameraSettings();
     const order = rotatedOrder();
     const layoutKey = `${state.settings?.grid_cols}:${state.settings?.grid_rows}|` + order.map((sid) => (
@@ -1721,7 +1712,7 @@ function renderSeats(options = {}) {
 function renderHands(order, options = {}) {
     if (!els.hands) return;
     els.hands.innerHTML = order.filter((sid) => (
-        !state.players[sid]?.eliminated
+        !state.players[sid]?.is_bot && !state.players[sid]?.eliminated
     )).map((sid) => {
         const hideHeld = options.hideAnimTargets && options.action
             && (options.action.type === "draw" || options.action.type === "take")
@@ -1732,12 +1723,14 @@ function renderHands(order, options = {}) {
 }
 
 function layoutHands(order) {
+    if (usesReadableTable()) return;
     if (!els.hands) return;
     const stage = document.querySelector(".table-stage");
     if (!stage) return;
     const stageRect = stage.getBoundingClientRect();
     const layerRect = els.hands.getBoundingClientRect();
     order.forEach((sid) => {
+        if (state.players[sid]?.is_bot) return;
         const hand = els.hands.querySelector(`[data-held="${CSS.escape(sid)}"]`);
         const frame = seatWorldFrame(sid);
         const anchor = heldWorldAnchor(sid);
@@ -1750,9 +1743,9 @@ function layoutHands(order) {
         let top = stageRect.top - layerRect.top + point.y;
         hand.style.left = `${left.toFixed(2)}px`;
         hand.style.top = `${top.toFixed(2)}px`;
-        const handYaw = uprightHandYaw(frame.yaw);
+        const handYaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
         hand.style.setProperty("--hand-yaw", `${handYaw.toFixed(2)}deg`);
-        hand.style.setProperty("--hand-depth-scale", (depthScale * frame.scale).toFixed(4));
+        hand.style.setProperty("--hand-depth-scale", depthScale.toFixed(4));
     });
 }
 
@@ -1793,6 +1786,7 @@ function renderNameplates(order, positions) {
 
 /** Snap each nameplate onto the radial line from table center, entirely outside the oval. */
 function layoutNameplates(order) {
+    if (usesReadableTable()) return;
     const stage = document.querySelector(".table-stage");
     if (!stage || !els.nameplates) return;
     const stageRect = stage.getBoundingClientRect();
@@ -1835,6 +1829,7 @@ function layoutNameplates(order) {
 
 /** Legs are screen-space furniture attached to the projected lower ellipse. */
 function layoutTableLegs() {
+    if (usesReadableTable()) return;
     const stage = document.querySelector(".table-stage");
     const table3d = document.querySelector(".table-3d");
     const legs = document.querySelector(".table-legs");
@@ -1995,6 +1990,15 @@ function renderSeat(sid, position, options = {}) {
             hidden: index === hideSlot || hiddenAnimationSlots.includes(index),
         }))
         .join("");
+    const hideBotHeld = options.hideAnimTargets && options.action
+        && (options.action.type === "draw" || options.action.type === "take")
+        && options.action.sid === sid;
+    const botHeld = usesReadableTable()
+        ? `<div class="seat-hand">${renderHeldSlot(sid, { hidden: hideBotHeld })}</div>`
+        : player.is_bot
+        ? renderBotHeldSlot(sid, { hidden: hideBotHeld })
+        : "";
+
     const style = [
         `--seat-width:var(--grid-width-${cols})`,
         `--seat-left:${position.left.toFixed(2)}%`,
@@ -2011,12 +2015,31 @@ function renderSeat(sid, position, options = {}) {
 
     return `
         <section class="${classes.join(" ")}" style="${style}" data-sid="${sid}">
+            ${usesReadableTable() ? `<header class="seat-heading"><strong>${escapeHtml(player.username)}${isMe ? " · You" : ""}</strong><span>${player.eliminated ? "Spectating" : player.called ? "Called" : state.status === "playing" && sid === state.current_turn_sid ? "Turn" : player.is_bot ? "Bot" : ""}</span></header>` : ""}
             <div class="seat-scale">
                 <div class="seat-board">
                     <div class="card-grid cols-${cols}" data-grid="${sid}" style="--board-cols:${cols};grid-template-columns:repeat(${cols}, minmax(0, 1fr))">${cards}</div>
+                    ${botHeld}
                 </div>
             </div>
         </section>
+    `;
+}
+
+function renderBotHeldSlot(sid, options = {}) {
+    const holding = playerIsHolding(sid);
+    const peek = state.held_peek?.sid === sid ? state.held_peek : null;
+    if (!holding && !peek) return "";
+    const hiddenClass = options.hidden ? " anim-hidden" : "";
+    const placement = heldPlacementFor(sid);
+    return `
+        <div
+            class="bot-held-slot held-${placement}${hiddenClass}"
+            data-held="${sid}"
+            style="--held-card-tilt:${TABLE.heldCardTilt}deg"
+        >
+            <div class="card-back held-card" data-held-card="${sid}"></div>
+        </div>
     `;
 }
 
@@ -2670,7 +2693,7 @@ function boardWorldAnchor(sid, index) {
     const row = Math.floor(index / cols);
     const localX = (col - (cols - 1) / 2) * (TABLE.cardWidth + TABLE.cardGap) * frame.scale;
     const localY = (row - (rows - 1) / 2) * (TABLE.cardHeight + TABLE.cardGap) * frame.scale;
-    return { ...worldFromSeatLocal(frame, localX, localY), scale: frame.scale };
+    return worldFromSeatLocal(frame, localX, localY);
 }
 
 function heldWorldAnchor(sid) {
@@ -2740,8 +2763,8 @@ function captureAnchors() {
             y: r.top + (r.height - sized.h) / 2,
             w: sized.w,
             h: sized.h,
-            yaw,
-            world,
+            yaw: usesReadableTable() ? 0 : yaw,
+            world: usesReadableTable() ? null : world,
         };
     };
     const out = {
@@ -2758,7 +2781,7 @@ function captureAnchors() {
             document.querySelector(`[data-held-card="${CSS.escape(sid)}"]`)
             || document.querySelector(`[data-held="${CSS.escape(sid)}"]`),
             seat,
-            null,
+            state.players[sid]?.is_bot ? heldWorldAnchor(sid) : null,
         );
         out.boards[sid] = {};
         const len = state.players[sid]?.board?.length || 4;
@@ -2830,10 +2853,10 @@ function flyCardOnPlane({
         el.innerHTML = html;
         surface.appendChild(el);
 
-        const setPose = (x, y, yaw, tilt, lift, cardScale = 1) => {
-            el.style.transform = `translate3d(${x * scale}px, ${y * scale}px, ${lift}px) translate(-50%, -50%) rotateZ(${yaw}deg) rotateX(${tilt}deg) scale(${cardScale})`;
+        const setPose = (x, y, yaw, tilt, lift) => {
+            el.style.transform = `translate3d(${x * scale}px, ${y * scale}px, ${lift}px) translate(-50%, -50%) rotateZ(${yaw}deg) rotateX(${tilt}deg)`;
         };
-        setPose(start.x, start.y, start.yaw || 0, start.tilt || 0, 2, start.scale || 1);
+        setPose(start.x, start.y, start.yaw || 0, start.tilt || 0, 2);
         const generation = animationGeneration;
         const t0 = performance.now();
 
@@ -2846,7 +2869,7 @@ function flyCardOnPlane({
             const yaw = (start.yaw || 0) + shortestDeg((end.yaw || 0) - (start.yaw || 0)) * e;
             const tilt = (start.tilt || 0) + ((end.tilt || 0) - (start.tilt || 0)) * e;
             const lift = 2 + Math.sin(Math.PI * e) * scale * 0.34;
-            setPose(x, y, yaw, tilt, lift, (start.scale || 1) + ((end.scale || 1) - (start.scale || 1)) * e);
+            setPose(x, y, yaw, tilt, lift);
             if (t < 1) {
                 requestAnimationFrame(frame);
             } else {
@@ -2948,7 +2971,7 @@ function destHeld(sid, afterAnchors) {
     const held = afterAnchors.held[sid];
     if (held?.world) return held;
     // Prefer a real held-card rect; ignore tiny/warped AABBs from hidden trays.
-    if (held && held.w > 0) return held;
+    if (held && (usesReadableTable() || (held.w >= 40 && held.h >= 50))) return held;
 
     const seat = afterAnchors.seats[sid];
     if (seat) {
@@ -2967,7 +2990,7 @@ function destHeld(sid, afterAnchors) {
 function destBoard(sid, index, afterAnchors) {
     const slot = afterAnchors.boards[sid] && afterAnchors.boards[sid][index];
     if (slot?.world) return slot;
-    if (slot && slot.w > 0) return slot;
+    if (slot && (usesReadableTable() || (slot.w >= 30 && slot.h >= 40))) return slot;
     return destHeld(sid, afterAnchors);
 }
 

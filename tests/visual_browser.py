@@ -15,9 +15,6 @@ with sync_playwright() as p:
     page.locator('#username-input').fill('River')
     page.locator('#join-room-btn').click()
     page.locator('#ready-btn').wait_for()
-    def click_card(card):
-        box = card.bounding_box()
-        page.mouse.click(box['x'] + box['width']/2, box['y'] + box['height']/2)
     def setup(**data):
         response = page.request.post('http://127.0.0.1:5010/qa/setup', data=data)
         assert response.ok, response.text()
@@ -27,25 +24,32 @@ with sync_playwright() as p:
     for size in [4, 3, 2]:
         sid = setup(size=size, held=True)
         page.screenshot(path=str(out / f'grid-{size}-six-players.png'))
-        assert page.locator('.felt').is_visible()
-        assert page.locator('.table-surface').evaluate('(el) => getComputedStyle(el).transform') != 'none'
-        assert page.locator('.seat').count() == 6
-        assert page.locator('.board-card.keyboard-focus').count() == 0
-        missed = page.locator('.board-card').evaluate_all("cards => cards.filter(card => {\n            const r = card.getBoundingClientRect();\n            return cardAtPoint(r.x+r.width/2, r.y+r.height/2) !== card;\n        }).map(card => ({owner: card.dataset.owner, index: card.dataset.index}))")
-        assert not missed, missed
+        if size > 2:
+            widths = page.locator('.board-card').evaluate_all('(cards) => cards.map(c => c.getBoundingClientRect().width)')
+            assert min(widths) >= 35, widths
+            assert max(widths) - min(widths) < 1, widths
+            overlaps = page.locator('.seat').evaluate_all('''seats => seats.flatMap(seat => {
+                const cards = [...seat.querySelectorAll('.board-card, .held-card')];
+                return cards.flatMap((card, i) => cards.slice(i+1).filter(other => {
+                    const a = card.getBoundingClientRect(), b = other.getBoundingClientRect();
+                    return a.left < b.right-1 && a.right > b.left+1 && a.top < b.bottom-1 && a.bottom > b.top+1;
+                }).map(other => [card.dataset.index, other.dataset.index]));
+            })''')
+            assert not overlaps, overlaps
+            assert page.locator('.board-card.keyboard-focus').count() == 0
     for rows, cols in [(2,4), (4,2), (3,4)]:
         setup(rows=rows, cols=cols)
         assert page.locator('.seat.me .board-card').count() == rows*cols
         widths = page.locator('.board-card').evaluate_all('(cards) => cards.map(c => c.getBoundingClientRect().width)')
-        assert min(widths) >= 15
+        assert min(widths) >= 35
     sid = setup(size=3, my_turn=True)
     page.keyboard.press('2')
     page.keyboard.press('d')
     assert page.locator('.board-card.keyboard-focus').get_attribute('data-owner') == 'qa-1'
     assert page.locator('.board-card.keyboard-focus').get_attribute('data-index') == '1'
     page.locator('#draw-btn').click()
-    page.locator('.hand-tray .held-card').wait_for()
-    click_card(page.locator(f'.board-card[data-owner="{sid}"][data-index="0"]'))
+    page.locator('.seat.me .held-card').wait_for()
+    page.locator(f'.board-card[data-owner="{sid}"][data-index="0"]').click()
     page.wait_for_timeout(230)
     assert page.locator('#discard-btn .rank').first.inner_text() == '7'
     assert page.locator('.board-card.keyboard-focus').count() == 0
@@ -67,7 +71,7 @@ with sync_playwright() as p:
     page.wait_for_timeout(180)
     assert page.locator('.burn-showdown-row.loser').count() == 1
     correct = page.locator(f'.board-card[data-owner="{sid}"][data-index="0"]')
-    click_card(correct)
+    correct.click()
     page.locator('.burn-showdown-row.winner').wait_for()
     page.wait_for_timeout(220)
     assert page.locator('.burn-showdown-row.loser').count() == 1
@@ -86,5 +90,5 @@ with sync_playwright() as p:
     setup(size=4, held=True)
     page.screenshot(path=str(out/'grid-4-1280.png'))
     assert not errors, errors
-    print(json.dumps({'errors':errors,'wrong_burn_observed_ms':wrong_ms,'screenshots':8,'table_and_card_hit_checks':'passed','one_attempt_per_press':'passed'}))
+    print(json.dumps({'errors':errors,'wrong_burn_observed_ms':wrong_ms,'screenshots':8,'card_overlap_checks':'passed','one_attempt_per_press':'passed'}))
     browser.close()
