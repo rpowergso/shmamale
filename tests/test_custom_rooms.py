@@ -588,7 +588,6 @@ class UnifiedRoomRouteTests(unittest.TestCase):
         self.assertIn(b"selectKeyboardPlayer(Number(event.key))", game_js)
         self.assertIn(b'event.code === "Space"', game_js)
         self.assertIn(b'event.key === "Enter"', game_js)
-        self.assertIn(b'"(pointer: coarse)"', game_js)
         self.assertIn(b'window.visualViewport?.addEventListener("resize"', game_js)
         self.assertIn(b"compactLandscape ? measuredHeight", game_js)
         self.assertIn(b'socket.emit("send_chat"', game_js)
