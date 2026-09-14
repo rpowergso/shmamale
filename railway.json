@@ -6,7 +6,7 @@
   "deploy": {
     "startCommand": "gunicorn --bind 0.0.0.0:${PORT:-8000} --worker-class gthread --workers 1 --threads 100 --access-logfile - --error-logfile - app:app",
     "multiRegionConfig": {
-      "us-east4-eqdc4a": {
+      "us-west2": {
         "numReplicas": 1
       }
     },

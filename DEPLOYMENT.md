@@ -30,3 +30,8 @@ store can remove this limitation.
 When the service is connected to GitHub, pushes to `main` can deploy
 automatically. Railway reads `railway.json` on each deployment, checks `/health`,
 and only then routes traffic to the new version.
+
+The service uses one replica in US West (`us-west2`). Railway currently blocks
+free-plan deployments from 8 a.m. to 8 p.m. in each region's local timezone;
+for US West this is Pacific time. See the
+[deployment restrictions](https://docs.railway.com/deployments/reference#free-tier-peak-hours-restriction).
