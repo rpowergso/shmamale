@@ -209,15 +209,18 @@
         <section id="hand-overlays" class="hand-overlays"></section>
         <section id="nameplates" class="nameplates"></section>
 
-        <aside class="side-panel" aria-label="Scores and call">
+        <aside class="game-rail" aria-label="Game activity">
+        <section class="side-panel" aria-label="Scores and call">
             <div class="side-panel-title">Points</div>
             <div id="score-chips" class="score-chips"></div>
             <button id="call-btn" class="btn btn-yellow call-btn">CALL</button>
+        </section>
+        <section id="burn-showdown" class="burn-showdown" aria-label="Burn order" aria-live="polite"></section>
+        <section id="round-results" class="round-results hidden" aria-label="Round results" aria-live="polite"></section>
         </aside>
 
         <div id="fly-layer" class="fly-layer" aria-hidden="true"></div>
         <div id="ability-overlay" class="ability-overlay hidden"></div>
-        <div id="burn-showdown" class="burn-showdown hidden" aria-live="polite"></div>
         <div id="keyboard-action-menu" class="keyboard-action-menu hidden" role="dialog" aria-label="Choose a turn action"></div>
     </div>
 </main>

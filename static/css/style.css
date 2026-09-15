@@ -2518,7 +2518,95 @@ kbd {
     animation: swap-pulse 1.2s ease-in-out infinite;
 }
 
+/* Compact game status stays beside the original wooden table. */
+.game-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    max-height: calc(100% - 24px);
+    overflow-y: auto;
+    position: absolute;
+    right: 8px;
+    top: 12px;
+    width: 190px;
+    z-index: 36;
+}
+
+.play-area > .table-3d {
+    margin-left: 0;
+    margin-right: auto;
+    width: calc(100% - 198px);
+}
+
+.game-rail .side-panel,
+.game-rail .burn-showdown,
+.game-rail .round-results {
+    background: rgba(10, 14, 18, 0.92);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 12px;
+    flex: 0 0 auto;
+    inset: auto;
+    margin: 0;
+    padding: 10px;
+    position: relative;
+    width: 100%;
+}
+
+.game-rail .side-panel { display: flex; }
+.game-rail .burn-showdown { display: block; pointer-events: auto; }
+.game-rail .burn-showdown h2 { font-size: .82rem; margin: 0; }
+.game-rail .burn-help,
+.game-rail .burn-empty { color: rgba(255,255,255,.62); font-size: .61rem; line-height: 1.35; margin: 5px 0; }
+.game-rail .burn-showdown-card {
+    animation: none;
+    background: none;
+    border: 0;
+    border-top: 1px solid rgba(255,255,255,.12);
+    border-radius: 0;
+    box-shadow: none;
+    margin-top: 7px;
+    padding: 7px 0 0;
+    text-align: left;
+}
+.game-rail .burn-showdown-kicker { font-size: .59rem; letter-spacing: 0; margin-bottom: 5px; }
+.game-rail .burn-showdown-list { gap: 4px; }
+.game-rail .burn-showdown-row {
+    animation: none;
+    gap: 5px;
+    grid-template-columns: 17px minmax(0, 1fr) auto;
+    padding: 6px 5px;
+}
+.game-rail .burn-showdown-row.winner { background: #153b2d; border-color: #318359; opacity: 1; }
+.game-rail .burn-showdown-row.loser { background: #48262b; border-color: #a24e5a; opacity: 1; }
+.game-rail .burn-showdown-place { font-size: .6rem; height: 17px; width: 17px; }
+.game-rail .burn-showdown-player strong { font-size: .66rem; }
+.game-rail .burn-showdown-player small { font-size: .55rem; }
+.game-rail .burn-timing { display: grid; font-size: .62rem; text-align: right; }
+.game-rail .burn-timing small { color: rgba(255,255,255,.6); font-size: .52rem; }
+
+.game-rail .round-results .overlay-card {
+    background: none;
+    border: 0;
+    box-shadow: none;
+    margin: 0;
+    max-width: none;
+    padding: 0;
+    text-align: left;
+}
+.game-rail .round-results .overlay-card h2 { font-size: 1rem; }
+.game-rail .round-results .overlay-card p,
+.game-rail .round-results .result-row { font-size: .67rem; }
+.game-rail .round-results .panel-actions .btn { width: 100%; }
+
+/* Clickable only means the card accepts input; it does not mean the rank matches. */
+.board-card.selectable,
+.board-card.selectable:hover { outline: none; }
+.board-card.opening-peek { outline: 2px dashed #67e8f9; }
+.board-card.selected { outline: 2px solid #ffe274; }
+.board-card.is-hover { outline: 2px solid rgba(255, 226, 116, .74); }
+
 @media (max-width: 850px) {
+    .play-area > .table-3d { width: 100%; }
     .tutorial-shell { padding: 0 12px 18px; }
 
     .tutorial-topbar {
@@ -2599,7 +2687,7 @@ kbd {
         min-height: 620px;
     }
 
-    .side-panel {
+    .game-rail {
         align-items: center;
         bottom: 8px;
         flex-direction: row;
@@ -2611,6 +2699,20 @@ kbd {
         width: auto;
         z-index: 60;
     }
+
+    .game-rail .side-panel { align-items: center; flex-direction: row; padding: 8px; }
+    .game-rail .burn-showdown { display: none; }
+    .game-rail .round-results:not(.hidden) { display: block; }
+    .game-rail:has(.round-results:not(.hidden)) {
+        align-items: stretch;
+        bottom: 8px;
+        flex-direction: column;
+        left: auto;
+        max-height: calc(100% - 80px);
+        width: min(280px, calc(100% - 16px));
+    }
+    .game-rail:has(.round-results:not(.hidden)) .side-panel,
+    .game-rail:has(.round-results:not(.hidden)) .burn-showdown { display: none; }
 
     .topbar {
         gap: 6px;
@@ -2749,7 +2851,7 @@ kbd {
         min-height: 0;
     }
 
-    .side-panel {
+    .game-rail {
         align-items: stretch;
         bottom: 4px;
         flex-direction: column;
@@ -2759,6 +2861,12 @@ kbd {
         right: max(4px, env(safe-area-inset-right));
         top: 4px;
         width: 116px;
+    }
+
+    .game-rail .side-panel {
+        align-items: stretch;
+        flex-direction: column;
+        padding: 6px;
     }
 
     .score-chips {

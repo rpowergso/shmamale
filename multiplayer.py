@@ -59,7 +59,7 @@ from game import (
 
 rooms = {}
 FINAL_COUNTDOWN_SECONDS = 3.0
-BURN_CONTEST_SECONDS = 0.85
+BURN_CONTEST_SECONDS = 0.12
 MAX_PLAYERS = 6
 LOBBY_RECONNECT_GRACE_SECONDS = 60
 MAX_CHAT_MESSAGES = 100
@@ -360,6 +360,7 @@ def player_view(game, viewer_sid):
         "round_results": deepcopy(game["round_results"]),
         "winner_summary": deepcopy(game["winner_summary"]),
         "burn_showdown": deepcopy(game.get("burn_showdown")),
+        "burn_history": deepcopy(game.get("burn_history", [])),
         "action_log": list(game["action_log"]),
     }
 
@@ -476,6 +477,7 @@ def start_round(game):
     game["burn_contests"] = {}
     game["active_burn_contest_id"] = None
     game["burn_showdown"] = None
+    game["burn_history"] = []
     game["burn_locked_discard_ids"] = set()
     game["burnt_slots"] = []
     game["burn_blockers"] = []
@@ -1004,14 +1006,7 @@ def publish_burn_showdown(game, contest):
     if not contest.get("attempts"):
         return
     attempts = sorted(contest["attempts"], key=lambda item: item["time_ms"])
-    baseline = next(
-        (
-            attempt["time_ms"]
-            for attempt in attempts
-            if attempt["sid"] == contest.get("winner_sid")
-        ),
-        attempts[0]["time_ms"],
-    )
+    baseline = attempts[0]["time_ms"]
     public_attempts = [
         {
             "sid": attempt["sid"],
@@ -1027,12 +1022,16 @@ def publish_burn_showdown(game, contest):
     game["burn_showdown_sequence"] = game.get("burn_showdown_sequence", 0) + 1
     game["burn_showdown"] = {
         "id": game["burn_showdown_sequence"],
+        "placed_at": contest["started_at"],
         "discard_card": public_card(contest["discard_card"]),
         "winner_sid": contest["winner_sid"],
         "winner_target": deepcopy(contest.get("winner_target")),
         "contest_window_ms": int(round(BURN_CONTEST_SECONDS * 1000)),
         "attempts": public_attempts,
     }
+    history = game.setdefault("burn_history", [])
+    history.append(deepcopy(game["burn_showdown"]))
+    del history[:-8]
 
 
 def burn_attempt_is_eligible(game, attempt):
@@ -1921,6 +1920,29 @@ def on_burn_from_peek(data):
     if is_discard_burn_locked(game):
         emit_error("That discard has already had a card burned on it.")
         return
+    peek_contest = {
+        "discard_card": game["discard_pile"][-1],
+        "started_at": game.get("burn_window_started_at") or time.time(),
+        "attempts": [],
+        "winner_sid": None,
+        "winner_target": None,
+    }
+    peek_attempt = register_burn_attempt(
+        game, peek_contest, request.sid, peek["owner_sid"], peek["index"],
+        peek["card"], time.time(),
+    )
+
+    def record_peek_result(success):
+        peek_attempt["result"] = "winner" if success else "miss"
+        peek_attempt["penalty"] = not success
+        if success:
+            peek_contest["winner_sid"] = request.sid
+            peek_contest["winner_target"] = {
+                "owner_sid": peek["owner_sid"], "index": peek["index"],
+                "card": public_card(peek["card"]),
+            }
+        publish_burn_showdown(game, peek_contest)
+
     if is_slot_burnt(game, peek["owner_sid"], peek["index"]):
         apply_failed_burn(game, request.sid, peek["owner_sid"], peek["index"], peek["card"], "already_burnt")
         # Restore slot so reveal is visible, then clear held
@@ -1930,6 +1952,7 @@ def on_burn_from_peek(data):
         }
         game["held_peek"] = None
         game["pending_ability"] = None
+        record_peek_result(False)
         advance_turn(game)
         emit_state(room)
         return
@@ -1942,6 +1965,7 @@ def on_burn_from_peek(data):
         }
         game["held_peek"] = None
         game["pending_ability"] = None
+        record_peek_result(False)
         advance_turn(game)
         emit_state(room)
         return
@@ -1967,6 +1991,7 @@ def on_burn_from_peek(data):
             from_peek=True,
         )
         add_log(game, f"{player_name(game, request.sid)} burned their peeked {target_card['label']}.")
+        record_peek_result(True)
         advance_turn(game)
         emit_state(room)
         return
@@ -1981,6 +2006,7 @@ def on_burn_from_peek(data):
     # After give completes, turn should advance — finish_burn_give will not auto-advance.
     # Mark that ability finished via peek burn.
     game["_advance_after_burn_give"] = True
+    record_peek_result(True)
     emit_state(room)
 
 

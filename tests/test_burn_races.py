@@ -6,6 +6,7 @@ from app import app, socketio
 from bot import BOT_CONFIG, initialize_bot_round_knowledge, maybe_schedule_bot_burn
 from game import make_card, make_player, make_slot, new_room, reset_discard_burn_state
 from multiplayer import (
+    BURN_CONTEST_SECONDS,
     advance_turn,
     apply_failed_burn,
     finalize_burn_contest,
@@ -88,7 +89,7 @@ class BurnRaceTests(unittest.TestCase):
             game, "bot1", "human", 0, discard["id"], started + 1.1
         )
         second, _, _ = resolve_burn_attempt(
-            game, "bot2", "human", 0, discard["id"], started + 1.35
+            game, "bot2", "human", 0, discard["id"], started + 1.15
         )
 
         self.assertEqual(first, "pending")
@@ -102,7 +103,7 @@ class BurnRaceTests(unittest.TestCase):
         loser = game["burn_showdown"]["attempts"][1]
         self.assertEqual(loser["result"], "late")
         self.assertTrue(loser["penalty"])
-        self.assertEqual(loser["delta_ms"], 250)
+        self.assertEqual(loser["delta_ms"], 50)
         self.assertEqual(game["players"]["bot2"]["board"][0]["card"]["rank"], "5")
         self.assertEqual(game["pending_burn"]["sid"], "bot1")
         self.assertIsNone(game["players"]["human"]["board"][0])
@@ -128,7 +129,7 @@ class BurnRaceTests(unittest.TestCase):
             game, "bot1", "bot1", 2, discard["id"], started + 0.5
         )
         late, _, message = resolve_burn_attempt(
-            game, "bot2", "bot2", 2, discard["id"], started + 1.36
+            game, "bot2", "bot2", 2, discard["id"], started + 0.5 + BURN_CONTEST_SECONDS + 0.01
         )
 
         self.assertEqual(first, "pending")
@@ -152,6 +153,23 @@ class BurnRaceTests(unittest.TestCase):
             game, "bot2", "bot2", 2, discard["id"], started + 1.6
         )
         self.assertEqual(second, "pending")
+        finalize_burn_contest(game, discard["id"])
+        self.assertEqual(len(game["burn_history"]), 2)
+        self.assertEqual(game["burn_history"][0]["attempts"][0]["result"], "miss")
+        self.assertEqual(game["burn_history"][1]["attempts"][0]["result"], "winner")
+        self.assertEqual(game["burn_history"][0]["placed_at"], game["burn_history"][1]["placed_at"])
+
+    def test_timeline_uses_pile_origin_and_previous_attempt_gap(self):
+        game, discard = self.make_race_game()
+        game["players"]["bot1"]["board"][2] = make_slot(card("8", "clubs"))
+        started = game["burn_window_started_at"]
+        resolve_burn_attempt(game, "bot1", "bot1", 2, discard["id"], started + 0.5)
+        resolve_burn_attempt(game, "bot2", "bot2", 2, discard["id"], started + 0.55)
+        finalize_burn_contest(game, discard["id"])
+        first, second = game["burn_showdown"]["attempts"]
+        self.assertLessEqual(BURN_CONTEST_SECONDS, 0.15)
+        self.assertEqual((first["result"], first["time_ms"], first["delta_ms"]), ("miss", 500, 0))
+        self.assertEqual((second["result"], second["time_ms"], second["delta_ms"]), ("winner", 550, 50))
 
     def test_each_eligible_bot_gets_an_independent_burn_timer(self):
         room = "SCHEDULE"
@@ -195,6 +213,39 @@ class BurnRaceTests(unittest.TestCase):
 
 
 class LiveBurnShowdownTests(unittest.TestCase):
+    def test_peek_burns_are_kept_in_timeline(self):
+        for rank, result in [("7", "winner"), ("9", "miss")]:
+            with self.subTest(result=result):
+                client = socketio.test_client(app)
+                room = f"PEEK{rank}"
+                try:
+                    client.emit("join", {"room": room, "username": "Peeker"})
+                    game = rooms[room]
+                    sid = game["host_sid"]
+                    game["players"]["other"] = make_player("Other")
+                    game["player_order"].append("other")
+                    game["players"][sid]["board"] = [None, make_slot(card("2")), None, None]
+                    game["players"]["other"]["board"] = [make_slot(card("3")), None, None, None]
+                    game.update(status="playing", phase="ability", turn_index=0)
+                    game["held_peek"] = {
+                        "sid": sid, "owner_sid": sid, "index": 0, "card": card(rank),
+                    }
+                    game["pending_ability"] = {
+                        "sid": sid, "type": "peek_own", "stage": "holding",
+                    }
+                    discard = card("7", "hearts")
+                    game["discard_pile"] = [discard]
+                    game["draw_pile"] = [card("4", "diamonds")]
+                    reset_discard_burn_state(game)
+                    client.emit("burn_from_peek", {"room": room})
+                    history = game["burn_history"]
+                    self.assertEqual(len(history), 1)
+                    self.assertEqual(history[0]["discard_card"]["id"], discard["id"])
+                    self.assertEqual(history[0]["attempts"][0]["result"], result)
+                finally:
+                    client.disconnect()
+                    rooms.pop(room, None)
+
     def tearDown(self):
         rooms.pop("LIVEBURN", None)
 
@@ -245,7 +296,7 @@ class LiveBurnShowdownTests(unittest.TestCase):
                 target["id"],
             )
 
-            socketio.sleep(1.0)
+            socketio.sleep(BURN_CONTEST_SECONDS + 0.1)
             final_states = [
                 packet["args"][0]
                 for packet in second.get_received()
