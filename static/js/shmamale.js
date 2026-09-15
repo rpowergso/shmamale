@@ -4,10 +4,10 @@ const socket = (typeof io !== "undefined")
     ? io()
     : { emit() {}, on() {} };
 
-const ANIM_MS = 180;
-const PICKUP_ANIM_MS = 180;
-const CENTER_ANIM_MS = 180;
-const SWITCH_ANIM_MS = 180;
+const ANIM_MS = 480;
+const PICKUP_ANIM_MS = 540;
+const CENTER_ANIM_MS = 680;
+const SWITCH_ANIM_MS = 620;
 
 let mySid = "";
 let myUsername = "";
@@ -16,6 +16,11 @@ let prevState = null;
 let ready = false;
 let toastTimer = null;
 let lastActionKey = "";
+let animationGeneration = 0;
+let activeAnimation = null;
+let keyboardFocusVisible = false;
+let suppressBurnClick = false;
+const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
 /** @type {{sid: string, index: number, untilTurnSid: string}|null} */
 let swapMark = null;
 let recentCardMarks = {
@@ -24,11 +29,9 @@ let recentCardMarks = {
     createdBySid: "",
     throughTurnSid: "",
 };
-let animationGeneration = 0;
-let keyboardFocusVisible = false;
-let suppressBurnClick = false;
 let finalCountdownEndsAt = 0;
 let lastBurnShowdownId = 0;
+let burnShowdownTimer = null;
 let activeGridPeekMode = "self";
 let tableCameraCache = null;
 let seatLayoutCache = { key: "", positions: [] };
@@ -67,20 +70,24 @@ document.addEventListener("DOMContentLoaded", () => {
     applyTableCameraSettings();
     initializeGameMode();
     window.setInterval(updateCountdownText, 100);
+    let viewportFrame = 0;
     const handleViewportChange = () => {
-        syncAppViewportHeight();
-        applyTableCameraSettings(true);
-        if (!state) return;
-        if (els.seats && state.players) renderSeats();
-        else if (els.seats) layoutNameplates(rotatedOrder());
-        layoutArLabels();
-        layoutAbilityTray();
+        if (viewportFrame) return;
+        viewportFrame = requestAnimationFrame(() => {
+            viewportFrame = 0;
+            syncAppViewportHeight();
+            applyTableCameraSettings(true);
+            if (!state) return;
+            if (els.seats && state.players) renderSeats(activeAnimation || {});
+            else if (els.seats) layoutNameplates(rotatedOrder());
+            layoutArLabels();
+            layoutAbilityTray();
+        });
     };
     window.addEventListener("resize", handleViewportChange);
     window.addEventListener("orientationchange", handleViewportChange);
     window.visualViewport?.addEventListener("resize", handleViewportChange);
     window.visualViewport?.addEventListener("scroll", handleViewportChange);
-    document.addEventListener("scroll", layoutArLabels, true);
 });
 
 socket.on("connect", () => {
@@ -104,8 +111,6 @@ socket.on("game_state", (nextState) => {
 
 async function applyGameState(nextState) {
     // Authoritative state never waits for a cosmetic animation.
-    const generation = ++animationGeneration;
-    document.querySelectorAll(".fly-card").forEach((card) => card.remove());
     if (nextState.viewer_sid) {
         mySid = nextState.viewer_sid;
     }
@@ -113,6 +118,14 @@ async function applyGameState(nextState) {
     const actionKey = action
         ? `${action.id ?? `${action.type}:${action.epoch}:${action.sid || ""}:${action.index ?? ""}:${action.owner_sid || ""}`}`
         : "";
+
+    const changed = actionKey !== lastActionKey || nextState.status !== state?.status;
+    if (changed) {
+        ++animationGeneration;
+        activeAnimation = null;
+        document.querySelectorAll(".fly-card").forEach((card) => card.remove());
+    }
+    const generation = animationGeneration;
 
     // Capture DOM anchors from the current board before we replace it.
     const anchors = captureAnchors();
@@ -147,9 +160,13 @@ async function applyGameState(nextState) {
             showToast(own ? `${who} looked at a card.` : `${who} looked at someone's card.`);
         }
         const burnResult = action.type === "burn" || action.type === "burn_fail";
-        render({ hideAnimTargets: !burnResult, action });
-        await playActionAnimation(action, anchors, generation);
-        if (generation === animationGeneration) render();
+        activeAnimation = { hideAnimTargets: !burnResult && !reducedMotion.matches, action };
+        render(activeAnimation);
+        try {
+            if (!reducedMotion.matches) await playActionAnimation(action, anchors, generation);
+        } finally {
+            if (generation === animationGeneration) { activeAnimation = null; render(); }
+        }
         return;
     }
     render();
@@ -420,6 +437,8 @@ function updateChatUnread() {
 
 function renderChat() {
     if (!els.chatMessages) return;
+    const followLatest = els.chatMessages.scrollHeight - els.chatMessages.scrollTop - els.chatMessages.clientHeight < 48;
+    const previousScroll = els.chatMessages.scrollTop;
     if (!chatMessages.length) {
         els.chatMessages.innerHTML = '<p class="chat-empty">No messages yet.</p>';
         updateChatUnread();
@@ -440,7 +459,7 @@ function renderChat() {
     }).join("");
     updateChatUnread();
     if (!els.chatPanel?.classList.contains("hidden")) {
-        els.chatMessages.scrollTop = els.chatMessages.scrollHeight;
+        els.chatMessages.scrollTop = followLatest ? els.chatMessages.scrollHeight : previousScroll;
     }
 }
 
@@ -455,7 +474,9 @@ function sendChatMessage(event) {
 }
 
 function pileControlAtPoint(clientX, clientY) {
-    const direct = document.elementFromPoint(clientX, clientY)?.closest?.(".pile-card, .prompt-label");
+    const hit = document.elementFromPoint(clientX, clientY);
+    if (hit?.closest?.(".overlay-card, .ability-overlay:not(.pass-through):not(.hidden), .keyboard-action-menu, .side-panel")) return null;
+    const direct = hit?.closest?.(".pile-card, .prompt-label");
     if (direct) return direct;
     // The isolated center piles also need a fallback on the tilted plane.
     return [els.drawPrompt, els.drawBtn, els.takePrompt, els.playPrompt, els.discardBtn]
@@ -471,7 +492,7 @@ function cardAtPoint(clientX, clientY) {
     const hit = document.elementFromPoint(clientX, clientY);
     const direct = hit?.closest?.(".board-card");
     if (direct) return direct;
-    if (hit?.closest?.(".held-slot, .nameplate, .game-rail, .overlay-card, .pile-card, .prompt-label")) return null;
+    if (hit?.closest?.(".held-slot, .nameplate, .side-panel, .overlay-card, .ability-overlay:not(.pass-through):not(.hidden), .keyboard-action-menu, .pile-card, .prompt-label")) return null;
     // Chromium can miss the near half of a perspective plane. Test the actual
     // projected quadrilateral, never the overlapping bounding rectangles.
     const stageRect = document.querySelector(".table-stage").getBoundingClientRect();
@@ -518,6 +539,7 @@ function bindCardPointerFallback() {
     const stage = document.querySelector(".play-area") || document.body;
 
     stage.addEventListener("pointerdown", (event) => {
+        if (!event.isPrimary || event.button !== 0) return;
         suppressBurnClick = false;
         keyboardFocusVisible = false;
         refreshKeyboardFocusDom();
@@ -559,22 +581,28 @@ function bindCardPointerFallback() {
         cardClicked(owner, index);
     }, true);
 
+    let hoverFrame = 0;
+    let pointer = null;
     stage.addEventListener("pointermove", (event) => {
-        document.querySelectorAll(".board-card.is-hover").forEach((el) => el.classList.remove("is-hover"));
-        if (pileControlAtPoint(event.clientX, event.clientY)) {
-            stage.classList.add("card-cursor");
-            return;
-        }
-        const card = cardAtPoint(event.clientX, event.clientY);
-        if (card && !card.classList.contains("empty")) {
-            card.classList.add("is-hover");
-            stage.classList.add("card-cursor");
-        } else {
-            stage.classList.remove("card-cursor");
-        }
+        if (event.pointerType === "touch") return;
+        pointer = { x: event.clientX, y: event.clientY };
+        if (hoverFrame) return;
+        hoverFrame = requestAnimationFrame(() => {
+            hoverFrame = 0;
+            const pile = pileControlAtPoint(pointer.x, pointer.y);
+            const card = pile ? null : cardAtPoint(pointer.x, pointer.y);
+            const target = card?.classList.contains("clickable") ? card : null;
+            document.querySelectorAll(".board-card.is-hover").forEach(el => {
+                if (el !== target) el.classList.remove("is-hover");
+            });
+            target?.classList.add("is-hover");
+            stage.classList.toggle("card-cursor", Boolean(target || (pile && !pile.disabled)));
+        });
     });
 
     stage.addEventListener("pointerleave", () => {
+        cancelAnimationFrame(hoverFrame);
+        hoverFrame = 0;
         document.querySelectorAll(".board-card.is-hover").forEach((el) => el.classList.remove("is-hover"));
         stage.classList.remove("card-cursor");
     });
@@ -666,7 +694,7 @@ function updateRecentCardMarks(action, actionKey, nextState) {
     }
 }
 
-function render(options = {}) {
+function render(options = activeAnimation || {}) {
     if (!state) return;
     if (state.status === "lobby") {
         keyboardNav.menuOpen = false;
@@ -680,6 +708,37 @@ function render(options = {}) {
     if (els.lobby) els.lobby.classList.add("hidden");
     els.game.classList.remove("hidden");
     renderGame(options);
+}
+
+// Keep unchanged cards in the DOM so focus, hover and CSS motion survive snapshots.
+function updateMarkup(container, html) {
+    const template = document.createElement("template");
+    template.innerHTML = html;
+    const sync = (parent, incoming) => {
+        Array.from(incoming.childNodes).forEach((next, index) => {
+            const current = parent.childNodes[index];
+            if (!current) { parent.appendChild(next.cloneNode(true)); return; }
+            if (current.nodeType !== next.nodeType || current.nodeName !== next.nodeName
+                || (current.nodeType === 1 && ["owner", "index", "sid", "held"].some(key => current.dataset[key] !== next.dataset[key]))) {
+                current.replaceWith(next.cloneNode(true));
+                return;
+            }
+            if (current.nodeType !== 1) {
+                if (current.nodeValue !== next.nodeValue) current.nodeValue = next.nodeValue;
+                return;
+            }
+            // Layout positions are maintained by the projection pass.
+            for (const attr of Array.from(current.attributes)) {
+                if (!next.hasAttribute(attr.name) && attr.name !== "style") current.removeAttribute(attr.name);
+            }
+            for (const attr of next.attributes) {
+                if (current.getAttribute(attr.name) !== attr.value) current.setAttribute(attr.name, attr.value);
+            }
+            sync(current, next);
+        });
+        while (parent.childNodes.length > incoming.childNodes.length) parent.lastChild.remove();
+    };
+    sync(container, template.content);
 }
 
 function renderLobby() {
@@ -1074,6 +1133,10 @@ function gameShortcutBlocked(target) {
 function handleGameKeydown(event) {
     const key = event.key.toLowerCase();
     if (!els.keybindsOverlay?.classList.contains("hidden")) {
+        if (event.key === "Tab") {
+            event.preventDefault();
+            els.keybindsClose?.focus();
+        }
         if (event.key === "Escape" || key === "k" || event.key === "?") {
             event.preventDefault();
             closeKeybinds();
@@ -1155,6 +1218,8 @@ function renderPiles() {
     const visibleDiscard = state.discard_top;
     els.drawCount.textContent = String(state.draw_count);
     els.discardCount.textContent = String(state.discard_count);
+    els.drawBtn.closest(".pile")?.classList.toggle("has-cards", state.draw_count > 0);
+    els.discardBtn.closest(".pile")?.classList.toggle("has-cards", Boolean(visibleDiscard));
 
     const choose = canChooseNow();
     const holding = holdingMyDraw();
@@ -1194,11 +1259,6 @@ function layoutArLabels() {
             return;
         }
         const r = cardEl.getBoundingClientRect();
-        const viewport = document.querySelector(".play-area").getBoundingClientRect();
-        if (r.bottom < viewport.top || r.top > viewport.bottom) {
-            btn.classList.remove("is-placed");
-            return;
-        }
         const cx = r.left + r.width / 2 + xOffset;
         const top = r.top - 8;
         btn.style.left = `${(cx - overlayRect.left).toFixed(2)}px`;
@@ -1326,9 +1386,9 @@ function applyTableCameraSettings(force = false) {
     // Never size the table against an invented minimum or the local/bottom row
     // will be rendered below the clipped play area.
     const stageWidth = compactLandscape ? measuredWidth : Math.max(320, measuredWidth);
-    const stageHeight = compactLandscape ? measuredHeight : Math.max(420, measuredHeight);
+    const stageHeight = measuredHeight;
     const topClearance = compactLandscape ? 6 : stageWidth < 700 ? 34 : 42;
-    const legReserve = compactLandscape ? 10 : stageWidth < 700 ? 74 : 122;
+    const legReserve = compactLandscape ? 10 : Math.min(stageHeight * 0.18, stageWidth < 700 ? 74 : 122);
     const l = TABLE.cameraLength;
     const d = TABLE.cameraDistance;
     const h = TABLE.cameraHeight;
@@ -1338,7 +1398,7 @@ function applyTableCameraSettings(force = false) {
     const unitByWidth = stageWidth * 0.92 / TABLE.width;
     const usableHeight = Math.max(1, stageHeight - topClearance - legReserve);
     const unitByHeight = usableHeight / (nearPerUnit + farPerUnit);
-    const scale = Math.max(compactLandscape ? 8 : 24, Math.min(110, unitByWidth, unitByHeight));
+    const scale = Math.max(1, Math.min(110, unitByWidth, unitByHeight));
     const centerY = topClearance + farPerUnit * scale;
     const cardWidth = TABLE.cardWidth * scale;
     const cardHeight = TABLE.cardHeight * scale;
@@ -1414,8 +1474,11 @@ function boardShape(sid) {
     return { boardLength, cols, rows, boardWidth, boardHeight };
 }
 
-function heldPlacementFor() {
-    return "side";
+function heldPlacementFor(sid) {
+    const shape = boardShape(sid);
+    const crowdedTable = (state?.player_order?.length || 0) >= 5;
+    const narrowScreen = window.innerWidth < 760;
+    return shape.cols >= 4 || crowdedTable || narrowScreen ? "below" : "side";
 }
 
 function boardGrowthScale(sid) {
@@ -1698,16 +1761,16 @@ function seatLayout(order) {
 function renderSeats(options = {}) {
     applyTableCameraSettings();
     const order = rotatedOrder();
-    const layoutKey = `${state.settings?.grid_cols}:${state.settings?.grid_rows}|` + order.map((sid) => (
+    const layoutKey = `${state.settings?.grid_cols}:${state.settings?.grid_rows}:${window.innerWidth < 760}|` + order.map((sid) => (
         `${sid}:${state.players[sid]?.board?.length || 0}`
     )).join("|");
     if (seatLayoutCache.key !== layoutKey) {
         seatLayoutCache = { key: layoutKey, positions: seatLayout(order) };
     }
     const positions = seatLayoutCache.positions;
-    els.seats.innerHTML = order
+    updateMarkup(els.seats, order
         .map((sid, index) => renderSeat(sid, positions[index], options))
-        .join("");
+        .join(""));
     els.seats.dataset.count = String(order.length);
     renderHands(order, options);
     renderNameplates(order, positions);
@@ -1720,14 +1783,14 @@ function renderSeats(options = {}) {
 
 function renderHands(order, options = {}) {
     if (!els.hands) return;
-    els.hands.innerHTML = order.filter((sid) => (
-        !state.players[sid]?.eliminated
+    updateMarkup(els.hands, order.filter((sid) => (
+        !state.players[sid]?.is_bot && !state.players[sid]?.eliminated
     )).map((sid) => {
         const hideHeld = options.hideAnimTargets && options.action
             && (options.action.type === "draw" || options.action.type === "take")
             && options.action.sid === sid;
         return renderHeldSlot(sid, { hidden: hideHeld });
-    }).join("");
+    }).join(""));
     layoutHands(order);
 }
 
@@ -1738,6 +1801,7 @@ function layoutHands(order) {
     const stageRect = stage.getBoundingClientRect();
     const layerRect = els.hands.getBoundingClientRect();
     order.forEach((sid) => {
+        if (state.players[sid]?.is_bot) return;
         const hand = els.hands.querySelector(`[data-held="${CSS.escape(sid)}"]`);
         const frame = seatWorldFrame(sid);
         const anchor = heldWorldAnchor(sid);
@@ -1750,7 +1814,7 @@ function layoutHands(order) {
         let top = stageRect.top - layerRect.top + point.y;
         hand.style.left = `${left.toFixed(2)}px`;
         hand.style.top = `${top.toFixed(2)}px`;
-        const handYaw = uprightHandYaw(frame.yaw);
+        const handYaw = state.players[sid]?.is_bot ? 0 : uprightHandYaw(frame.yaw);
         hand.style.setProperty("--hand-yaw", `${handYaw.toFixed(2)}deg`);
         hand.style.setProperty("--hand-depth-scale", (depthScale * frame.scale).toFixed(4));
     });
@@ -1758,7 +1822,7 @@ function layoutHands(order) {
 
 function renderNameplates(order, positions) {
     if (!els.nameplates) return;
-    els.nameplates.innerHTML = order.map((sid, i) => {
+    updateMarkup(els.nameplates, order.map((sid, i) => {
         const player = state.players[sid];
         const isMe = sid === mySid;
         const pos = positions[i];
@@ -1786,7 +1850,7 @@ function renderNameplates(order, positions) {
                 <div class="seat-badges">${badges}</div>
             </div>
         `;
-    }).join("");
+    }).join(""));
 
     layoutNameplates(order);
 }
@@ -1995,6 +2059,13 @@ function renderSeat(sid, position, options = {}) {
             hidden: index === hideSlot || hiddenAnimationSlots.includes(index),
         }))
         .join("");
+    const hideBotHeld = options.hideAnimTargets && options.action
+        && (options.action.type === "draw" || options.action.type === "take")
+        && options.action.sid === sid;
+    const botHeld = player.is_bot
+        ? renderBotHeldSlot(sid, { hidden: hideBotHeld })
+        : "";
+
     const style = [
         `--seat-width:var(--grid-width-${cols})`,
         `--seat-left:${position.left.toFixed(2)}%`,
@@ -2013,10 +2084,28 @@ function renderSeat(sid, position, options = {}) {
         <section class="${classes.join(" ")}" style="${style}" data-sid="${sid}">
             <div class="seat-scale">
                 <div class="seat-board">
-                    <div class="card-grid cols-${cols}" data-grid="${sid}" style="--board-cols:${cols};grid-template-columns:repeat(${cols}, minmax(0, 1fr))">${cards}</div>
+                    <div class="card-grid cols-${cols}" data-grid="${sid}" style="grid-template-columns:repeat(${cols}, 1fr)">${cards}</div>
+                    ${botHeld}
                 </div>
             </div>
         </section>
+    `;
+}
+
+function renderBotHeldSlot(sid, options = {}) {
+    const holding = playerIsHolding(sid);
+    const peek = state.held_peek?.sid === sid ? state.held_peek : null;
+    if (!holding && !peek) return "";
+    const hiddenClass = options.hidden ? " anim-hidden" : "";
+    const placement = heldPlacementFor(sid);
+    return `
+        <div
+            class="bot-held-slot held-${placement}${hiddenClass}"
+            data-held="${sid}"
+            style="--held-card-tilt:${TABLE.heldCardTilt}deg"
+        >
+            <div class="card-back held-card" data-held-card="${sid}"></div>
+        </div>
     `;
 }
 
@@ -2117,7 +2206,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
     const selected = isSelectedByAbility(ownerSid, index);
     const kingTargeted = isKingTargeted(ownerSid, index);
     const burnt = isBurntSlot(ownerSid, index);
-    const highlight = shouldHighlightSlot(ownerSid, index);
+    const actionHighlight = shouldHighlightSlot(ownerSid, index);
     const opening = canOpeningPeek(ownerSid, index, slot);
     const looked = isRecentlyMarked("looked", ownerSid, index)
         || isKingInspectionCard(ownerSid, index);
@@ -2140,7 +2229,9 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
         classes.push("ability-picked-up");
     }
     if (burnt) classes.push("burnt");
-    if (highlight) classes.push("swap-mark");
+    if (actionHighlight === "swap") classes.push("swap-mark");
+    if (actionHighlight === "burn") classes.push("burn-mark");
+    if (actionHighlight === "burn_fail") classes.push("burn-fail-mark");
     if (looked) classes.push("looked-mark");
     if (switched) classes.push("switched-mark");
     if (opening) classes.push("opening-peek");
@@ -2152,7 +2243,7 @@ function renderBoardCard(ownerSid, index, slot, options = {}) {
         ? cardFaceHtml(slot.card)
         : "";
 
-    return `<button type="button" class="${classes.join(" ")}" data-owner="${ownerSid}" data-index="${index}" aria-label="${escapeHtml(state.players[ownerSid].username)}, card ${index + 1}${slot.faceUp && slot.card ? `, ${escapeHtml(slot.card.label)}` : ", face down"}">${html}</button>`;
+    return `<button type="button" class="${classes.join(" ")}" data-owner="${ownerSid}" data-index="${index}">${html}</button>`;
 }
 
 function canOpeningPeek(ownerSid, index, slot) {
@@ -2163,13 +2254,13 @@ function canOpeningPeek(ownerSid, index, slot) {
 }
 
 function shouldHighlightSlot(ownerSid, index) {
-    if (swapMark && swapMark.sid === ownerSid && swapMark.index === index) return true;
+    if (swapMark && swapMark.sid === ownerSid && swapMark.index === index) return "swap";
     const action = state.last_action;
-    if (!action) return false;
+    if (!action) return "";
     if ((action.type === "burn" || action.type === "burn_fail") && action.owner_sid === ownerSid && action.index === index) {
-        return true;
+        return action.type;
     }
-    return false;
+    return "";
 }
 
 function isClickable(ownerSid, index, slot) {
@@ -2275,7 +2366,12 @@ function cardClicked(ownerSid, index) {
             showToast("That discard has already had a card burned on it.");
             return;
         }
-        burnCard(ownerSid, index);
+        socket.emit("burn_card", {
+            room: ROOM_ID,
+            owner_sid: ownerSid,
+            index,
+            discard_id: state.discard_top?.id || null,
+        });
         return;
     }
 
@@ -2421,13 +2517,9 @@ function renderAbilityOverlay() {
     if (!els.abilityOverlay) return;
     els.abilityOverlay.classList.remove("pass-through");
 
-    const results = document.getElementById("round-results");
-    const roundOver = state.status === "round_over" || state.status === "game_over";
-    results.classList.toggle("hidden", !roundOver);
-    results.innerHTML = roundOver ? renderRoundOverHtml() : "";
-    if (roundOver) {
-        els.abilityOverlay.classList.add("hidden");
-        els.abilityOverlay.innerHTML = "";
+    if (state.status === "round_over" || state.status === "game_over") {
+        els.abilityOverlay.classList.remove("hidden");
+        els.abilityOverlay.innerHTML = renderRoundOverHtml();
         return;
     }
 
@@ -2594,8 +2686,9 @@ function renderRoundOverHtml() {
 
 const CARD_ASPECT = 0.72; // width / height
 
-function easeInOutCubic(t) {
-    return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+function easeCardMotion(t) {
+    // Minimum-jerk motion: velocity and acceleration both settle to zero at each end.
+    return t * t * t * (10 + t * (-15 + 6 * t));
 }
 
 /** Force card proportions — 3D AABB rects often look square or inflated. */
@@ -2650,6 +2743,7 @@ function worldFromSeatLocal(frame, localX, localY, tilt = 0) {
         y: frame.y + frame.tangent.y * localX + frame.outward.y * localY,
         yaw: frame.yaw,
         tilt,
+        scale: frame.scale,
     };
 }
 
@@ -2670,7 +2764,7 @@ function boardWorldAnchor(sid, index) {
     const row = Math.floor(index / cols);
     const localX = (col - (cols - 1) / 2) * (TABLE.cardWidth + TABLE.cardGap) * frame.scale;
     const localY = (row - (rows - 1) / 2) * (TABLE.cardHeight + TABLE.cardGap) * frame.scale;
-    return { ...worldFromSeatLocal(frame, localX, localY), scale: frame.scale };
+    return worldFromSeatLocal(frame, localX, localY);
 }
 
 function heldWorldAnchor(sid) {
@@ -2700,32 +2794,85 @@ function heldWorldAnchor(sid) {
 }
 
 function burnShowdownHtml(showdown) {
-    const attempts = (showdown.attempts || []).slice().sort((a, b) => a.time_ms - b.time_ms);
+    const attempts = (showdown.attempts || [])
+        .slice()
+        .sort((a, b) => a.time_ms - b.time_ms);
     const rows = attempts.map((attempt, index) => {
-        const result = { winner: "Correct burn", late: "Late · penalty", miss: "Wrong · penalty", cancelled: "Cancelled" }[attempt.result] || "Pending";
-        const status = attempt.result === "winner" ? "winner" : ["late", "miss"].includes(attempt.result) ? "loser" : "";
-        const gap = index ? `+${attempt.time_ms - attempts[index - 1].time_ms} ms` : "First";
-        return `<div class="burn-showdown-row ${status}">
-            <span class="burn-showdown-place">${index + 1}</span>
-            <span class="burn-showdown-player"><strong>${escapeHtml(state.players[attempt.sid]?.username || "Player")}</strong><small>${result}</small></span>
-            <span class="burn-timing"><b>${attempt.time_ms} ms</b><small>${gap}</small></span>
-        </div>`;
+        const name = state.players[attempt.sid]?.username || "Player";
+        let result = "Attempt";
+        if (attempt.sid === showdown.winner_sid) result = "First valid burn";
+        else if (attempt.result === "late") result = "Late burn · penalty card";
+        else if (attempt.result === "miss") result = "Wrong burn · penalty card";
+        else if (attempt.result === "cancelled") result = "Attempt cancelled";
+        const delta = Number(attempt.delta_ms) || 0;
+        const deltaLabel = `${delta > 0 ? "+" : ""}${delta}ms`;
+        return `
+            <div class="burn-showdown-row ${attempt.sid === showdown.winner_sid ? "winner" : "loser"}" style="--race-order:${index}">
+                <span class="burn-showdown-place">${index + 1}</span>
+                <span class="burn-showdown-player"><strong>${escapeHtml(name)}</strong><small>${result}</small></span>
+                <b>${escapeHtml(deltaLabel)}</b>
+            </div>
+        `;
     }).join("");
-    return `<div class="burn-showdown-card"><div class="burn-showdown-kicker">${escapeHtml(showdown.discard_card?.label || "Discard")} · placed at 0 ms</div><div class="burn-showdown-list">${rows}</div></div>`;
+    const card = showdown.discard_card?.label || "discard";
+    const winnerAttempt = attempts.find((attempt) => attempt.sid === showdown.winner_sid);
+    const winnerName = showdown.winner_sid
+        ? state.players[showdown.winner_sid]?.username || "Player"
+        : "";
+    const target = showdown.winner_target || {};
+    const ownerName = state.players[target.owner_sid]?.username || "a player";
+    const targetLabel = target.card?.label || "card";
+    const targetText = target.owner_sid === showdown.winner_sid
+        ? `their own ${targetLabel}`
+        : `${ownerName}'s ${targetLabel}`;
+    const winningSeconds = (Math.max(0, winnerAttempt?.time_ms || 0) / 1000).toFixed(2);
+    const isRace = attempts.length > 1;
+    const heading = showdown.winner_sid
+        ? `<h2><span>${escapeHtml(winnerName)}</span> burned ${escapeHtml(targetText)}</h2>`
+        : "<h2>No burn landed</h2>";
+    const reaction = showdown.winner_sid
+        ? `<div class="burn-winning-time">${winningSeconds}s<small>SERVER REACTION</small></div>`
+        : "";
+    return `
+        <div class="burn-showdown-card">
+            <div class="burn-impact" aria-hidden="true">${isRace ? "SHOWDOWN!" : "BURN!"}</div>
+            <div class="burn-showdown-kicker">${isRace ? "SERVER BURN SHOWDOWN" : "BURN CONFIRMED"} · ${escapeHtml(card)}</div>
+            ${heading}
+            ${reaction}
+            <div class="burn-showdown-list">${rows}</div>
+        </div>
+    `;
 }
 
 function renderBurnShowdown() {
     if (!els.burnShowdown) return;
-    const history = state.burn_history || (state.burn_showdown ? [state.burn_showdown] : []);
-    // Keep all attempts on the same discard together, including all-miss contests.
-    const groups = [];
-    for (const result of history) {
-        let group = groups.find((item) => item.discard_card?.id === result.discard_card?.id && item.placed_at === result.placed_at);
-        if (!group) { group = { ...result, attempts: [] }; groups.push(group); }
-        group.attempts.push(...result.attempts);
+    if (!state?.burn_showdown || state.status !== "playing") {
+        clearTimeout(burnShowdownTimer);
+        els.burnShowdown.classList.add("hidden");
+        els.burnShowdown.replaceChildren();
+        delete els.burnShowdown.dataset.content;
+        lastBurnShowdownId = 0;
+        return;
     }
-    lastBurnShowdownId = state.burn_showdown?.id || 0;
-    els.burnShowdown.innerHTML = `<h2>Burn order</h2><p class="burn-help">Time since placement · gap from previous attempt</p>${groups.reverse().map(burnShowdownHtml).join("") || '<p class="burn-empty">Burn attempts will appear here.</p>'}`;
+    const showdown = state.burn_showdown;
+    if (showdown.id === lastBurnShowdownId) {
+        const html = burnShowdownHtml(showdown);
+        if (els.burnShowdown.dataset.content !== html) {
+            els.burnShowdown.innerHTML = html;
+            els.burnShowdown.dataset.content = html;
+        }
+        return;
+    }
+    lastBurnShowdownId = showdown.id;
+    els.burnShowdown.dataset.content = burnShowdownHtml(showdown);
+    els.burnShowdown.innerHTML = els.burnShowdown.dataset.content;
+    els.burnShowdown.classList.remove("hidden");
+    if (burnShowdownTimer) window.clearTimeout(burnShowdownTimer);
+    burnShowdownTimer = window.setTimeout(() => {
+        els.burnShowdown.classList.add("hidden");
+        els.burnShowdown.replaceChildren();
+        delete els.burnShowdown.dataset.content;
+    }, (showdown.attempts || []).length > 1 ? 6500 : 4500);
 }
 
 function captureAnchors() {
@@ -2758,7 +2905,7 @@ function captureAnchors() {
             document.querySelector(`[data-held-card="${CSS.escape(sid)}"]`)
             || document.querySelector(`[data-held="${CSS.escape(sid)}"]`),
             seat,
-            null,
+            state.players[sid]?.is_bot ? heldWorldAnchor(sid) : null,
         );
         out.boards[sid] = {};
         const len = state.players[sid]?.board?.length || 4;
@@ -2840,7 +2987,7 @@ function flyCardOnPlane({
         function frame(now) {
             if (generation !== animationGeneration) { el.remove(); resolve(); return; }
             const t = Math.min(1, (now - t0) / duration);
-            const e = easeInOutCubic(t);
+            const e = easeCardMotion(t);
             const x = start.x + (end.x - start.x) * e;
             const y = start.y + (end.y - start.y) * e;
             const yaw = (start.yaw || 0) + shortestDeg((end.yaw || 0) - (start.yaw || 0)) * e;
@@ -2900,7 +3047,7 @@ function flyCard({
         el.style.left = `${from.x}px`;
         el.style.top = `${from.y}px`;
         // Screen-parallel flight — rotateZ only. rotateX made cards surge at the camera then vanish.
-        el.style.transform = `rotateZ(${yaw0}deg)`;
+        el.style.transform = `translate(${w0 / 2}px, ${h0 / 2}px) rotateZ(${yaw0}deg) translate(-50%, -50%)`;
         els.flyLayer.appendChild(el);
 
         const generation = animationGeneration;
@@ -2914,17 +3061,13 @@ function flyCard({
         function frame(now) {
             if (generation !== animationGeneration) { el.remove(); resolve(); return; }
             const t = Math.min(1, (now - t0) / duration);
-            const e = easeInOutCubic(t);
+            const e = easeCardMotion(t);
             const x = x0 + (x1 - x0) * e;
             const y = y0 + (y1 - y0) * e + midLift * Math.sin(Math.PI * e);
             const w = w0 + (w1 - w0) * e;
             const h = h0 + (h1 - h0) * e;
             const yaw = yaw0 + shortestDeg(yaw1 - yaw0) * e;
-            el.style.left = `${x}px`;
-            el.style.top = `${y}px`;
-            el.style.width = `${w}px`;
-            el.style.height = `${h}px`;
-            el.style.transform = `rotateZ(${yaw}deg)`;
+            el.style.transform = `translate3d(${x - x0 + w / 2}px, ${y - y0 + h / 2}px, 0) rotateZ(${yaw}deg) scale(${w / w0}, ${h / h0}) translate(-50%, -50%)`;
             if (t < 1) {
                 requestAnimationFrame(frame);
             } else {
@@ -3103,13 +3246,6 @@ function burnFromPeek() {
     socket.emit("burn_from_peek", { room: ROOM_ID });
 }
 
-function canAttemptBoardBurn(inspection = false) {
-    return state?.status === "playing" && state.discard_top && state.discard_burn_available
-        && !state.pending_burn && !holdingMyDraw()
-        && (inspection || !(state.pending_ability?.sid === mySid && state.phase === "ability"))
-        && !state.players[mySid]?.called && !state.players[mySid]?.eliminated;
-}
-
 function burnCard(ownerSid, index) {
     const slot = state?.players[ownerSid]?.board?.[index];
     const inspection = state?.pending_ability?.sid === mySid
@@ -3176,4 +3312,11 @@ function escapeHtml(value) {
         .replace(/>/g, "&gt;")
         .replace(/"/g, "&quot;")
         .replace(/'/g, "&#039;");
+}
+
+function canAttemptBoardBurn(inspection = false) {
+    return state?.status === "playing" && state.discard_top && state.discard_burn_available
+        && !state.pending_burn && !holdingMyDraw()
+        && (inspection || !(state.pending_ability?.sid === mySid && state.phase === "ability"))
+        && !state.players[mySid]?.called && !state.players[mySid]?.eliminated;
 }

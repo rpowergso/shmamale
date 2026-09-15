@@ -1,5 +1,4 @@
 {% extends "layout.html" %}
-{% block extra_head %}<link rel="stylesheet" href="{{ url_for('static', filename='css/game-table.css') }}">{% endblock %}
 {% block content %}
 <script>
     const ROOM_ID = "{{ room_id }}";
@@ -211,13 +210,12 @@
         <section id="nameplates" class="nameplates"></section>
 
         <aside class="game-rail" aria-label="Game activity">
-        <section class="side-panel" aria-label="Scores and call">
-            <div class="side-panel-title">Points</div>
-            <div id="score-chips" class="score-chips"></div>
-            <button id="call-btn" class="btn btn-yellow call-btn">CALL</button>
-        </section>
-        <section id="burn-showdown" class="burn-showdown" aria-label="Burn order" aria-live="polite"></section>
-        <section id="round-results" class="round-results hidden" aria-label="Round results" aria-live="polite"></section>
+            <section class="side-panel" aria-label="Scores and call">
+                <div class="side-panel-title">Points</div>
+                <div id="score-chips" class="score-chips"></div>
+                <button id="call-btn" class="btn btn-yellow call-btn">CALL</button>
+            </section>
+            <section id="burn-showdown" class="burn-showdown hidden" aria-label="Latest burn result" aria-live="polite"></section>
         </aside>
 
         <div id="fly-layer" class="fly-layer" aria-hidden="true"></div>

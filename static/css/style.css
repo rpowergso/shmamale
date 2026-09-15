@@ -916,6 +916,23 @@ input {
     padding-bottom: 0;
 }
 
+/* Motion stays on the compositor; respect the device's motion preference. */
+.fly-card { will-change: transform; }
+.board-card, .pile-card, .prompt-label { touch-action: manipulation; }
+.btn:focus-visible, .prompt-label:focus-visible, .board-card:focus-visible {
+    outline: 3px solid #8edcff;
+    outline-offset: 3px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+        scroll-behavior: auto !important;
+    }
+}
+
 .topbar {
     align-items: center;
     background: rgba(0, 0, 0, 0.42);
@@ -1253,7 +1270,7 @@ input {
     height: 100%;
     margin: 0 auto;
     max-width: 1500px;
-    min-height: 610px;
+    min-height: 0;
     overflow: visible;
     position: relative;
     transform-style: preserve-3d;
@@ -1957,8 +1974,8 @@ input {
     left: 0;
     position: fixed;
     top: 0;
-    transform-origin: center center;
-    will-change: left, top, transform, width, height;
+    transform-origin: top left;
+    will-change: transform;
     z-index: 81;
 }
 
@@ -2829,4 +2846,265 @@ kbd {
     .action-hint { display: none; }
     .turn-box strong { font-size: 0.76rem; }
     .turn-box span { font-size: 0.64rem; }
+}
+
+/* Reserve space for scores so the right-hand seats and names remain exposed. */
+@media (min-width: 851px) {
+    .play-area { padding-right: 188px; }
+    .hand-overlays, .nameplates { right: 176px; width: auto; }
+}
+
+/* The burn result joins the score rail only while it is active. */
+.game-rail {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    position: absolute;
+    right: 8px;
+    top: 12px;
+    width: 168px;
+    z-index: 82;
+}
+
+.game-rail .side-panel {
+    inset: auto;
+    position: relative;
+    right: auto;
+    top: auto;
+    width: 100%;
+}
+
+.game-rail .burn-showdown {
+    animation: burn-side-pop 0.38s cubic-bezier(0.16, 1, 0.3, 1) both;
+    background: transparent;
+    display: block;
+    inset: auto;
+    padding: 0;
+    pointer-events: none;
+    position: relative;
+    width: 100%;
+}
+
+.game-rail .burn-showdown-card {
+    animation: none;
+    background: linear-gradient(155deg, rgba(28, 34, 40, 0.98), rgba(8, 12, 16, 0.98));
+    border-radius: 12px;
+    max-height: min(44vh, 330px);
+    max-width: none;
+    overflow-y: auto;
+    padding: 10px;
+    text-align: left;
+    width: 100%;
+}
+
+.game-rail .burn-impact { display: none; }
+.game-rail .burn-showdown-card h2 { font-size: 0.78rem; line-height: 1.25; margin: 5px 0; }
+.game-rail .burn-winning-time { font-size: 1.05rem; margin: 4px 0 8px; }
+.game-rail .burn-showdown-list { gap: 5px; }
+.game-rail .burn-showdown-row {
+    animation-delay: calc(0.08s + var(--race-order) * 0.07s);
+    gap: 5px;
+    grid-template-columns: 18px minmax(0, 1fr) auto;
+    padding: 6px;
+}
+.game-rail .burn-showdown-place { height: 18px; width: 18px; }
+.game-rail .burn-showdown-player strong { font-size: 0.69rem; }
+.game-rail .burn-showdown-player small { font-size: 0.56rem; }
+.game-rail .burn-showdown-row b { font-size: 0.65rem; }
+
+@keyframes burn-side-pop {
+    from { opacity: 0; transform: translate3d(22px, 0, 0) scale(0.96); }
+    to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+}
+
+@media (max-width: 850px) and (orientation: landscape) {
+    .game-rail {
+        bottom: 4px;
+        gap: 5px;
+        right: max(4px, env(safe-area-inset-right));
+        top: 4px;
+        width: 116px;
+    }
+    .game-rail .side-panel { flex: 1 1 auto; min-height: 0; }
+    .game-rail .burn-showdown { flex: 0 1 auto; min-height: 0; }
+    .game-rail .burn-showdown-card { max-height: 42vh; padding: 6px; }
+    .game-rail .burn-winning-time { display: none; }
+    .game-rail .burn-showdown-row { grid-template-columns: 16px minmax(0, 1fr); }
+    .game-rail .burn-showdown-row b { display: none; }
+}
+
+/* Rich cards with meaningful, mutually distinct interaction states. */
+.game-shell .board-card {
+    transition:
+        transform 0.26s cubic-bezier(0.16, 1, 0.3, 1),
+        filter 0.22s ease,
+        box-shadow 0.24s ease,
+        outline-color 0.2s ease;
+}
+
+.game-shell .playing-card,
+.game-shell .board-card,
+.game-shell .card-back {
+    border-radius: calc(var(--card-width) * 0.1);
+    padding: calc(var(--card-width) * 0.05);
+}
+
+.game-shell .playing-card,
+.game-shell .board-card.face-up {
+    background:
+        radial-gradient(circle at 23% 13%, #ffffff 0%, rgba(255, 255, 255, 0.98) 18%, transparent 42%),
+        linear-gradient(145deg, #ffffff 0%, #fffbea 62%, #f3dda6 100%);
+    border: 1px solid rgba(255, 255, 255, 0.92);
+    box-shadow:
+        inset 0 0 0 1px rgba(255, 255, 255, 0.76),
+        inset 0 -5px 9px rgba(172, 116, 21, 0.12),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 0 rgba(40, 20, 4, 0.16),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 11px rgba(0, 0, 0, 0.36);
+}
+
+.game-shell .playing-card.red,
+.game-shell .board-card.red { color: #ef233c; }
+.game-shell .playing-card.black,
+.game-shell .board-card.black { color: #071018; }
+.game-shell .playing-card.joker,
+.game-shell .board-card.joker { color: #8a2fbd; }
+
+.game-shell .board-card.face-down,
+.game-shell .card-back {
+    background:
+        radial-gradient(circle at 22% 12%, rgba(178, 241, 255, 0.72), transparent 34%),
+        repeating-linear-gradient(45deg, rgba(255, 255, 255, 0.25) 0 3px, transparent 3px 9px),
+        linear-gradient(145deg, #20baff 0%, #0088df 44%, #0752a5 76%, #062d72 100%);
+    border: 1px solid #d5f7ff;
+    box-shadow:
+        inset 0 0 0 3px #0576ca,
+        inset 0 0 0 4px rgba(218, 250, 255, 0.58),
+        inset 0 -8px 12px rgba(0, 28, 104, 0.28),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 0 rgba(0, 22, 42, 0.22),
+        var(--shadow-x, 0px) var(--shadow-y, 4px) 11px rgba(0, 0, 0, 0.42);
+}
+
+.game-shell .card-corner { font-size: calc(var(--card-width) * 0.15); }
+.game-shell .card-corner .rank { font-size: calc(var(--card-width) * 0.19); }
+.game-shell .card-corner .suit { font-size: calc(var(--card-width) * 0.17); }
+.game-shell .card-center { font-size: calc(var(--card-width) * 0.26); }
+.game-shell .card-center.suit { font-size: calc(var(--card-width) * 0.31); }
+
+/* Clickable means an action is available, not that the card matches the discard. */
+.game-shell .board-card.selectable { outline: none; }
+.game-shell .board-card.is-hover,
+.game-shell .board-card.selectable:hover,
+.game-shell .board-card.opening-peek:hover {
+    box-shadow: 0 0 0 4px #fff3a8, 0 0 30px 8px rgba(255, 197, 42, 0.9);
+    filter: brightness(1.22) saturate(1.22);
+    outline: 3px solid #ffffff;
+    outline-offset: 3px;
+    transform: translateZ(2px) translateY(-4px) scale(1.055);
+}
+.game-shell .board-card.opening-peek {
+    animation: card-highlight-breathe 1.35s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #4ce9ff, 0 0 30px 8px rgba(0, 210, 255, 0.86);
+    outline: 3px dashed #d4fbff;
+    outline-offset: 3px;
+}
+.game-shell .board-card.selected {
+    animation: card-highlight-breathe 1.15s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #ffd629, 0 0 32px 9px rgba(255, 190, 0, 0.92);
+    outline: 3px solid #fff6bf;
+    outline-offset: 3px;
+}
+.game-shell .board-card.looked-mark {
+    animation: card-highlight-breathe 1.35s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #20a8ff, 0 0 32px 9px rgba(0, 137, 255, 0.94);
+    outline: 3px solid #d2efff;
+    outline-offset: 3px;
+}
+.game-shell .board-card.switched-mark,
+.game-shell .board-card.swap-mark {
+    animation: card-highlight-breathe 1.25s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #b94cff, 0 0 34px 10px rgba(164, 35, 255, 0.94);
+    outline: 3px solid #efd5ff;
+    outline-offset: 3px;
+}
+.game-shell .board-card.burn-mark {
+    animation: card-highlight-breathe 0.9s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #ff9f1c, 0 0 36px 11px rgba(255, 91, 15, 0.98);
+    outline: 3px solid #ffe0a9;
+    outline-offset: 3px;
+}
+.game-shell .board-card.burn-fail-mark {
+    animation: card-highlight-breathe 0.75s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 4px #ff3428, 0 0 38px 12px rgba(255, 25, 18, 0.98);
+    outline: 3px solid #ffd0cc;
+    outline-offset: 3px;
+}
+.game-shell .board-card.king-targeted {
+    box-shadow: 0 0 0 5px #ff3428, 0 0 40px 13px rgba(255, 25, 18, 1);
+    outline: 4px solid #ffd0cc;
+    outline-offset: 4px;
+}
+.game-shell .board-card.burn-attempt-pending {
+    box-shadow: 0 0 0 5px #ff8a1c, 0 0 42px 14px rgba(255, 80, 12, 1);
+    outline: 4px solid #ffe1ad;
+    outline-offset: 4px;
+}
+.game-shell .board-card.keyboard-focus {
+    animation: card-highlight-breathe 1s ease-in-out infinite alternate;
+    box-shadow: 0 0 0 5px #ffe229, 0 0 38px 12px rgba(255, 184, 0, 1) !important;
+    filter: brightness(1.2) saturate(1.16);
+    outline: 4px solid #fffbd6 !important;
+    outline-offset: 5px !important;
+    transform: translateZ(2px) translateY(-4px) scale(1.06);
+}
+
+@keyframes card-highlight-breathe {
+    from { filter: brightness(1.08) saturate(1.08); }
+    to { filter: brightness(1.3) saturate(1.28); }
+}
+
+/* Offset cards below each center pile make its depth readable in perspective. */
+.game-shell .pile {
+    isolation: isolate;
+}
+
+.game-shell .pile.has-cards::before,
+.game-shell .pile.has-cards::after {
+    border-radius: calc(var(--card-width) * 0.1);
+    content: "";
+    height: var(--card-height);
+    left: 0;
+    pointer-events: none;
+    position: absolute;
+    top: 0;
+    width: var(--card-width);
+}
+
+.game-shell .pile.has-cards::before {
+    transform: translate3d(calc(var(--world-scale) * 0.055), calc(var(--world-scale) * 0.07), -2px);
+    z-index: 1;
+}
+
+.game-shell .pile.has-cards::after {
+    transform: translate3d(calc(var(--world-scale) * 0.105), calc(var(--world-scale) * 0.14), -4px);
+    z-index: 0;
+}
+
+.game-shell .draw-pile.has-cards::before,
+.game-shell .draw-pile.has-cards::after {
+    background: linear-gradient(145deg, #087cc7, #063d83);
+    border: 1px solid #8cdcff;
+    box-shadow: 2px 3px 5px rgba(0, 0, 0, 0.4);
+}
+
+.game-shell .discard-pile.has-cards::before,
+.game-shell .discard-pile.has-cards::after {
+    background: linear-gradient(145deg, #fffdf4, #dfc993);
+    border: 1px solid rgba(91, 60, 23, 0.48);
+    box-shadow: 2px 3px 5px rgba(0, 0, 0, 0.4);
+}
+
+.game-shell .pile .pile-card { z-index: 3; }
+.game-shell .pile .pile-count {
+    top: calc(100% + var(--world-scale) * 0.16);
+    z-index: 4;
 }

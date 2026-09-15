@@ -36,12 +36,14 @@ def setup():
         player['board'] = [make_slot(make_card(['7','9','2','K'][j%4], suit='hearts' if j%2 else 'clubs', deck_number=i*20+j+1)) for j in range(rows*cols)]
     game['discard_pile'] = [make_card('7', suit='hearts', deck_number=200)]
     game['draw_pile'] = [make_card(str(2+i%8), suit='diamonds', deck_number=300+i) for i in range(40)]
+    if data.get('draw_rank'):
+        game['draw_pile'][-1] = make_card(data['draw_rank'], suit='clubs', deck_number=999)
     reset_discard_burn_state(game)
     if data.get('my_turn'):
         game['turn_index'] = 0
     if data.get('held'):
         game['pending_draw'] = {'sid': people[1], 'card': game['draw_pile'].pop(), 'source': 'draw'}
-        game['phase'] = 'holding'
+        game['phase'] = 'drawn'
     if data.get('round_over'):
         game.update(status='round_over', phase='round_over')
         game['round_results'] = {'raw_scores': {x: 12 for x in people}, 'round_scores': {x: 12 for x in people}, 'eliminated': [], 'next_start_sid': sid}
